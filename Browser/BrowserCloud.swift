@@ -437,7 +437,6 @@ struct BrowserMailMeetingEventSummary: Identifiable, Decodable, Equatable {
 }
 
 struct BrowserMailDashboard: Decodable, Equatable {
-    let categoryCounts: [String: Int]
     let securityCodes: [BrowserMailSecurityCode]
     let securityNotifications: [BrowserMailSecurityNotification]
     let notifications: [BrowserMailNotification]
@@ -475,7 +474,6 @@ struct BrowserMailDashboardPage<Row: Decodable & Equatable>: Decodable, Equatabl
 
 extension BrowserMailDashboard {
     static let empty = BrowserMailDashboard(
-        categoryCounts: [:],
         securityCodes: [],
         securityNotifications: [],
         notifications: [],
@@ -491,7 +489,6 @@ extension BrowserMailDashboard {
     )
 
     func updating(
-        categoryCounts: [String: Int]? = nil,
         securityCodes: [BrowserMailSecurityCode]? = nil,
         securityNotifications: [BrowserMailSecurityNotification]? = nil,
         notifications: [BrowserMailNotification]? = nil,
@@ -506,7 +503,6 @@ extension BrowserMailDashboard {
         spam: [BrowserMailClassificationSummary]? = nil
     ) -> BrowserMailDashboard {
         BrowserMailDashboard(
-            categoryCounts: categoryCounts ?? self.categoryCounts,
             securityCodes: securityCodes ?? self.securityCodes,
             securityNotifications: securityNotifications ?? self.securityNotifications,
             notifications: notifications ?? self.notifications,
@@ -824,6 +820,7 @@ final class BrowserSessionController: ObservableObject, BrowserCloudSynchronizin
 
         cancellables.removeAll()
         resetMailDashboardPagination()
+        mailDashboard = .empty
         client.subscribe(
             to: "google:connectedAccounts",
             with: ["sessionToken": sessionToken],
@@ -858,24 +855,6 @@ final class BrowserSessionController: ObservableObject, BrowserCloudSynchronizin
                 },
                 receiveValue: { [weak self] states in
                     self?.mailBackfillStates = states
-                }
-            )
-            .store(in: &cancellables)
-
-        client.subscribe(
-            to: "mail:dashboard",
-            with: ["sessionToken": sessionToken],
-            yielding: BrowserMailDashboard.self
-        )
-            .receive(on: DispatchQueue.main)
-            .sink(
-                receiveCompletion: { completion in
-                    if case .failure(let error) = completion {
-                        NSLog("Convex mail dashboard subscription failed: \(error)")
-                    }
-                },
-                receiveValue: { [weak self] dashboard in
-                    self?.mergeDashboardSnapshot(dashboard)
                 }
             )
             .store(in: &cancellables)
@@ -923,6 +902,45 @@ final class BrowserSessionController: ObservableObject, BrowserCloudSynchronizin
 
     func isLoadingDashboardSection(_ section: BrowserMailDashboardSection) -> Bool {
         dashboardLoadingSections.contains(section)
+    }
+
+    func ensureDashboardSectionLoaded(_ section: BrowserMailDashboardSection) {
+        guard dashboardRowsLoaded(for: section) == 0 else {
+            return
+        }
+        loadMoreDashboardSection(section)
+    }
+
+    func dashboardRowsLoaded(for section: BrowserMailDashboardSection) -> Int {
+        guard let mailDashboard else {
+            return 0
+        }
+        switch section {
+        case .shipments:
+            return mailDashboard.shipments.count
+        case .subscriptions:
+            return mailDashboard.subscriptions.count
+        case .orders:
+            return mailDashboard.orders.count
+        case .securityCodes:
+            return mailDashboard.securityCodes.count
+        case .notifications:
+            return mailDashboard.notifications.count
+        case .supportThreads:
+            return mailDashboard.supportThreads.count
+        case .invoices:
+            return mailDashboard.invoices.count
+        case .bookings:
+            return mailDashboard.bookings.count
+        case .meetingsEvents:
+            return mailDashboard.meetingsEvents.count
+        case .securityNotifications:
+            return mailDashboard.securityNotifications.count
+        case .promotions:
+            return mailDashboard.promotions.count
+        case .spam:
+            return mailDashboard.spam.count
+        }
     }
 
     func loadMoreDashboardSection(_ section: BrowserMailDashboardSection) {

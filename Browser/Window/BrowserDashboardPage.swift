@@ -7,9 +7,11 @@ struct BrowserDashboardPage: View {
     let onClose: () -> Void
 
     @State private var selectedMessage: BrowserMailDashboardMessage?
+    @State private var selectedSection: BrowserMailDashboardSection = .shipments
 
     private var dashboard: BrowserMailDashboard? { session.mailDashboard }
-    private let dashboardTileHeight: CGFloat = 260
+    private let dashboardTileHeight: CGFloat = 620
+    private let sidebarWidth: CGFloat = 245
     private var dashboardColumns: [GridItem] {
         [GridItem(.adaptive(minimum: 340), spacing: 20, alignment: .top)]
     }
@@ -24,17 +26,22 @@ struct BrowserDashboardPage: View {
             VStack(spacing: 0) {
                 dashHeader
                 if let dashboard {
-                    ScrollView {
-                        commandCenter(dashboard)
-                            .padding(24)
-                    }
+                    dashboardShell(dashboard)
                 } else {
                     emptyState
                 }
             }
         }
         .foregroundStyle(DashColor.primary)
-        .onAppear { session.refreshCloudData() }
+        .onAppear {
+            session.refreshCloudData()
+            DispatchQueue.main.async {
+                session.ensureDashboardSectionLoaded(selectedSection)
+            }
+        }
+        .onChange(of: selectedSection) { _, section in
+            session.ensureDashboardSectionLoaded(section)
+        }
         .onExitCommand(perform: onClose)
         .overlay {
             if let message = selectedMessage {
@@ -130,6 +137,187 @@ struct BrowserDashboardPage: View {
     }
 
     // MARK: Command Center
+
+    private func dashboardShell(_ dashboard: BrowserMailDashboard) -> some View {
+        HStack(spacing: 0) {
+            dashboardSidebar(dashboard)
+                .frame(width: sidebarWidth)
+                .padding(.horizontal, 14)
+                .padding(.bottom, 18)
+
+            Rectangle()
+                .fill(Color.white.opacity(0.06))
+                .frame(width: 1)
+
+            activeDashboardSection(dashboard)
+                .padding(22)
+        }
+    }
+
+    private func dashboardSidebar(_ dashboard: BrowserMailDashboard) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Mail")
+                    .font(.system(size: 11, weight: .semibold).monospaced())
+                    .foregroundStyle(DashColor.muted)
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 4)
+
+                ForEach(BrowserMailDashboardSection.allCases, id: \.self) { section in
+                    DashSidebarButton(
+                        title: sidebarTitle(for: section),
+                        systemImage: sidebarImage(for: section),
+                        isSelected: selectedSection == section,
+                        isLoading: session.isLoadingDashboardSection(section)
+                    ) {
+                        selectedSection = section
+                    }
+                }
+            }
+            .padding(.top, 8)
+        }
+    }
+
+    @ViewBuilder
+    private func activeDashboardSection(_ d: BrowserMailDashboard) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .firstTextBaseline) {
+                Label(sidebarTitle(for: selectedSection), systemImage: sidebarImage(for: selectedSection))
+                    .font(.system(size: 22, weight: .semibold))
+                Spacer()
+            }
+
+            sectionContent(d)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    @ViewBuilder
+    private func sectionContent(_ d: BrowserMailDashboard) -> some View {
+        switch selectedSection {
+        case .shipments:
+            populatedOrLoading(d.shipments, section: .shipments) {
+                shipmentsSection(d.shipments, section: .shipments)
+            }
+        case .subscriptions:
+            populatedOrLoading(d.subscriptions, section: .subscriptions) {
+                subscriptionsCard(d.subscriptions, section: .subscriptions)
+            }
+        case .orders:
+            populatedOrLoading(d.orders, section: .orders) {
+                purchasesCard(d.orders, section: .orders)
+            }
+        case .securityCodes:
+            populatedOrLoading(d.securityCodes, section: .securityCodes) {
+                securityCodesCard(d.securityCodes, section: .securityCodes)
+            }
+        case .notifications:
+            populatedOrLoading(d.notifications, section: .notifications) {
+                notificationsCard(d.notifications, section: .notifications)
+            }
+        case .supportThreads:
+            populatedOrLoading(d.supportThreads, section: .supportThreads) {
+                supportCard(d.supportThreads, section: .supportThreads)
+            }
+        case .invoices:
+            populatedOrLoading(d.invoices, section: .invoices) {
+                invoicesCard(d.invoices, section: .invoices)
+            }
+        case .bookings:
+            populatedOrLoading(d.bookings, section: .bookings) {
+                bookingsCard(d.bookings, section: .bookings)
+            }
+        case .meetingsEvents:
+            populatedOrLoading(d.meetingsEvents, section: .meetingsEvents) {
+                meetingsEventsCard(d.meetingsEvents, section: .meetingsEvents)
+            }
+        case .securityNotifications:
+            populatedOrLoading(d.securityNotifications, section: .securityNotifications) {
+                securityCard(d.securityNotifications, section: .securityNotifications)
+            }
+        case .promotions:
+            populatedOrLoading(d.promotions, section: .promotions) {
+                classificationCard(title: "Promotions", systemImage: "megaphone", rows: d.promotions, section: .promotions)
+            }
+        case .spam:
+            populatedOrLoading(d.spam, section: .spam) {
+                classificationCard(title: "Spam", systemImage: "exclamationmark.octagon", rows: d.spam, section: .spam)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func populatedOrLoading<Rows: Collection, Content: View>(
+        _ rows: Rows,
+        section: BrowserMailDashboardSection,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        if !rows.isEmpty {
+            content()
+        } else if session.isLoadingDashboardSection(section) {
+            DashCard {
+                VStack(spacing: 12) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Loading \(sidebarTitle(for: section).lowercased())")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(DashColor.tertiary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            .frame(height: dashboardTileHeight)
+        } else {
+            DashCard {
+                VStack(spacing: 10) {
+                    Image(systemName: sidebarImage(for: section))
+                        .font(.system(size: 22, weight: .semibold))
+                        .foregroundStyle(DashColor.muted)
+                    Text("No \(sidebarTitle(for: section).lowercased())")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(DashColor.tertiary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            .frame(height: dashboardTileHeight)
+            .onAppear {
+                session.ensureDashboardSectionLoaded(section)
+            }
+        }
+    }
+
+    private func sidebarTitle(for section: BrowserMailDashboardSection) -> String {
+        switch section {
+        case .shipments: return "Shipping"
+        case .subscriptions: return "Subscriptions"
+        case .orders: return "Purchases"
+        case .securityCodes: return "Security Codes"
+        case .notifications: return "Notifications"
+        case .supportThreads: return "Support"
+        case .invoices: return "Invoices"
+        case .bookings: return "Bookings"
+        case .meetingsEvents: return "Meetings & Events"
+        case .securityNotifications: return "Security"
+        case .promotions: return "Promotions"
+        case .spam: return "Spam"
+        }
+    }
+
+    private func sidebarImage(for section: BrowserMailDashboardSection) -> String {
+        switch section {
+        case .shipments: return "shippingbox"
+        case .subscriptions: return "arrow.triangle.2.circlepath"
+        case .orders: return "bag"
+        case .securityCodes: return "key.horizontal"
+        case .notifications: return "bell.badge"
+        case .supportThreads: return "lifepreserver"
+        case .invoices: return "doc.text"
+        case .bookings: return "ticket"
+        case .meetingsEvents: return "calendar.badge.clock"
+        case .securityNotifications: return "lock.shield"
+        case .promotions: return "megaphone"
+        case .spam: return "exclamationmark.octagon"
+        }
+    }
 
     @ViewBuilder
     private func commandCenter(_ d: BrowserMailDashboard) -> some View {
@@ -611,6 +799,50 @@ private struct DashCard<Content: View>: View {
 }
 
 // MARK: - Section Header
+
+private struct DashSidebarButton: View {
+    let title: String
+    let systemImage: String
+    let isSelected: Bool
+    let isLoading: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(isSelected ? DashColor.primary : DashColor.tertiary)
+                    .frame(width: 18)
+
+                Text(title)
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundStyle(isSelected ? DashColor.primary : DashColor.tertiary)
+                    .lineLimit(1)
+
+                Spacer(minLength: 8)
+
+                if isLoading {
+                    ProgressView()
+                        .controlSize(.small)
+                        .scaleEffect(0.62)
+                }
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 36)
+            .background(
+                isSelected ? Color.white.opacity(0.09) : Color.clear,
+                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(isSelected ? Color.white.opacity(0.08) : Color.clear, lineWidth: 1)
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+}
 
 private struct DashSectionHeader: View {
     let title: String

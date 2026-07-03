@@ -121,144 +121,6 @@ export const backfillStates = query({
   },
 });
 
-export const dashboard = query({
-  args: {
-    sessionToken: v.string(),
-  },
-  handler: async (ctx, args) => {
-    const userId = await getCurrentUser(ctx, args.sessionToken);
-    const now = Date.now();
-    const classifications = await ctx.db
-      .query("mailClassifications")
-      .withIndex("by_user_updated", (q) => q.eq("userId", userId))
-      .order("desc")
-      .take(1000);
-
-    const categoryCounts: Record<string, number> = {};
-    for (const classification of classifications) {
-      categoryCounts[classification.category] = (categoryCounts[classification.category] ?? 0) + 1;
-    }
-
-    const [
-      securityCodes,
-      securityNotifications,
-      notifications,
-      supportThreads,
-      orders,
-      shipments,
-      subscriptions,
-      invoices,
-      bookings,
-      meetingsEvents,
-      calendarEvents,
-    ] = await Promise.all([
-      ctx.db
-        .query("mailSecurityCodes")
-        .withIndex("by_user_updated", (q) => q.eq("userId", userId))
-        .order("desc")
-        .take(DASHBOARD_CANDIDATE_LIMIT),
-      ctx.db
-        .query("mailSecurityNotifications")
-        .withIndex("by_user_updated", (q) => q.eq("userId", userId))
-        .order("desc")
-        .take(DASHBOARD_CANDIDATE_LIMIT),
-      ctx.db
-        .query("mailNotifications")
-        .withIndex("by_user_updated", (q) => q.eq("userId", userId))
-        .order("desc")
-        .take(DASHBOARD_CANDIDATE_LIMIT),
-      ctx.db
-        .query("mailSupportThreads")
-        .withIndex("by_user_updated", (q) => q.eq("userId", userId))
-        .order("desc")
-        .take(DASHBOARD_CANDIDATE_LIMIT),
-      ctx.db
-        .query("mailOrders")
-        .withIndex("by_user_updated", (q) => q.eq("userId", userId))
-        .order("desc")
-        .take(DASHBOARD_CANDIDATE_LIMIT),
-      ctx.db
-        .query("mailShipments")
-        .withIndex("by_user_updated", (q) => q.eq("userId", userId))
-        .order("desc")
-        .take(DASHBOARD_CANDIDATE_LIMIT),
-      ctx.db
-        .query("mailSubscriptions")
-        .withIndex("by_user_updated", (q) => q.eq("userId", userId))
-        .order("desc")
-        .take(DASHBOARD_CANDIDATE_LIMIT),
-      ctx.db
-        .query("mailInvoices")
-        .withIndex("by_user_updated", (q) => q.eq("userId", userId))
-        .order("desc")
-        .take(DASHBOARD_CANDIDATE_LIMIT),
-      ctx.db
-        .query("mailBookings")
-        .withIndex("by_user_updated", (q) => q.eq("userId", userId))
-        .order("desc")
-        .take(DASHBOARD_CANDIDATE_LIMIT),
-      ctx.db
-        .query("mailMeetingsEvents")
-        .withIndex("by_user_updated", (q) => q.eq("userId", userId))
-        .order("desc")
-        .take(DASHBOARD_CANDIDATE_LIMIT),
-      ctx.db
-        .query("googleCalendarEvents")
-        .withIndex("by_user_start", (q) =>
-          q
-            .eq("userId", userId)
-            .gte("startTimestamp", now - DASHBOARD_CALENDAR_PAST_WINDOW_MS)
-            .lte("startTimestamp", now + DASHBOARD_CALENDAR_FUTURE_WINDOW_MS),
-        )
-        .take(DASHBOARD_CANDIDATE_LIMIT),
-    ]);
-    const hydratedBookings = await withBookingSummaries(ctx, bookings);
-    const hydratedMeetingEvents = await withMeetingEventSummaries(ctx, meetingsEvents);
-    const purchaseOnlyOrders = await ordersWithoutShipments(ctx, orders);
-    const calendarMeetingRows = calendarEvents.map((event) => ({
-      _id: `calendar:${event._id}`,
-      source: "calendar",
-      provider: "Calendar",
-      eventKey: event.providerEventId,
-      title: event.summary,
-      location: event.location,
-      url: event.htmlLink,
-      startTime: event.startTimestamp,
-      endTime: event.endTimestamp,
-      status: event.status,
-      updatedAt: event.startTimestamp ?? event.updatedAt,
-      message: null,
-      messages: [],
-    }));
-
-    return {
-      categoryCounts,
-      securityCodes: await withMessages(ctx, securityCodes, "gmailMessageId"),
-      securityNotifications: await withMessages(ctx, securityNotifications, "gmailMessageId"),
-      notifications: await withMessages(ctx, notifications, "gmailMessageId"),
-      supportThreads: await withMessages(ctx, supportThreads, "latestGmailMessageId"),
-      orders: await withOrderSummaries(ctx, purchaseOnlyOrders),
-      shipments: await withShipmentSummaries(ctx, shipments),
-      subscriptions: await withSubscriptionSummaries(ctx, subscriptions),
-      invoices: await withInvoiceSummaries(ctx, invoices),
-      bookings: hydratedBookings
-        .sort((lhs, rhs) => bookingSortTimestamp(rhs) - bookingSortTimestamp(lhs))
-        .slice(0, DASHBOARD_ITEM_LIMIT),
-      meetingsEvents: [...hydratedMeetingEvents, ...calendarMeetingRows]
-        .sort((lhs, rhs) => meetingEventSortTimestamp(lhs, now) - meetingEventSortTimestamp(rhs, now))
-        .slice(0, DASHBOARD_ITEM_LIMIT),
-      promotions: await withClassificationSummaries(
-        ctx,
-        classifications.filter((classification) => classification.category === "promotions"),
-      ),
-      spam: await withClassificationSummaries(
-        ctx,
-        classifications.filter((classification) => classification.category === "spam"),
-      ),
-    };
-  },
-});
-
 export const dashboardPage = query({
   args: {
     sessionToken: v.string(),
@@ -356,12 +218,46 @@ async function dashboardPageForSection(
       return { ...page, page: await withBookingSummaries(ctx, page.page, numItems) };
     }
     case "meetingsEvents": {
+      const now = Date.now();
       const page = await ctx.db
         .query("mailMeetingsEvents")
         .withIndex("by_user_updated", (q) => q.eq("userId", userId))
         .order("desc")
         .paginate(opts);
-      return { ...page, page: await withMeetingEventSummaries(ctx, page.page, numItems) };
+      const hydratedMeetingEvents = await withMeetingEventSummaries(ctx, page.page, numItems);
+      if (paginationOpts.cursor !== null) {
+        return { ...page, page: hydratedMeetingEvents };
+      }
+      const calendarEvents = await ctx.db
+        .query("googleCalendarEvents")
+        .withIndex("by_user_start", (q) =>
+          q
+            .eq("userId", userId)
+            .gte("startTimestamp", now - DASHBOARD_CALENDAR_PAST_WINDOW_MS)
+            .lte("startTimestamp", now + DASHBOARD_CALENDAR_FUTURE_WINDOW_MS),
+        )
+        .take(numItems);
+      const calendarMeetingRows = calendarEvents.map((event) => ({
+        _id: `calendar:${event._id}`,
+        source: "calendar",
+        provider: "Calendar",
+        eventKey: event.providerEventId,
+        title: event.summary,
+        location: event.location,
+        url: event.htmlLink,
+        startTime: event.startTimestamp,
+        endTime: event.endTimestamp,
+        status: event.status,
+        updatedAt: event.startTimestamp ?? event.updatedAt,
+        message: null,
+        messages: [],
+      }));
+      return {
+        ...page,
+        page: [...hydratedMeetingEvents, ...calendarMeetingRows]
+          .sort((lhs, rhs) => meetingEventSortTimestamp(lhs, now) - meetingEventSortTimestamp(rhs, now))
+          .slice(0, numItems),
+      };
     }
     case "promotions":
     case "spam": {
