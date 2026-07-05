@@ -42,7 +42,7 @@ struct BrowserDashboardPage: View {
         .onChange(of: selectedSection) { _, section in
             session.ensureDashboardSectionLoaded(section)
         }
-        .onExitCommand(perform: onClose)
+        .onExitCommand(perform: handleExitCommand)
         .overlay {
             if let message = selectedMessage {
                 DashEmailModal(
@@ -57,6 +57,14 @@ struct BrowserDashboardPage: View {
             }
         }
         .animation(.easeInOut(duration: 0.18), value: selectedMessage?.id)
+    }
+
+    private func handleExitCommand() {
+        if selectedMessage != nil {
+            selectedMessage = nil
+        } else {
+            onClose()
+        }
     }
 
     // MARK: Header
@@ -150,8 +158,11 @@ struct BrowserDashboardPage: View {
                 .frame(width: 1)
 
             activeDashboardSection(dashboard)
-                .padding(22)
+                .padding(.horizontal, 22)
+                .padding(.top, 22)
+                .padding(.bottom, 16)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private func dashboardSidebar(_ dashboard: BrowserMailDashboard) -> some View {
@@ -184,10 +195,17 @@ struct BrowserDashboardPage: View {
             HStack(alignment: .firstTextBaseline) {
                 Label(sidebarTitle(for: selectedSection), systemImage: sidebarImage(for: selectedSection))
                     .font(.system(size: 22, weight: .semibold))
+                Text("\(dashboardSectionCount(for: selectedSection, in: d))")
+                    .font(.system(size: 12, weight: .semibold).monospaced())
+                    .foregroundStyle(DashColor.muted)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Color.white.opacity(0.06), in: Capsule())
                 Spacer()
             }
 
             sectionContent(d)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
@@ -255,30 +273,24 @@ struct BrowserDashboardPage: View {
         if !rows.isEmpty {
             content()
         } else if session.isLoadingDashboardSection(section) {
-            DashCard {
-                VStack(spacing: 12) {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text("Loading \(sidebarTitle(for: section).lowercased())")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(DashColor.tertiary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            VStack(spacing: 12) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Loading \(sidebarTitle(for: section).lowercased())")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(DashColor.tertiary)
             }
-            .frame(height: dashboardTileHeight)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            DashCard {
-                VStack(spacing: 10) {
-                    Image(systemName: sidebarImage(for: section))
-                        .font(.system(size: 22, weight: .semibold))
-                        .foregroundStyle(DashColor.muted)
-                    Text("No \(sidebarTitle(for: section).lowercased())")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(DashColor.tertiary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            VStack(spacing: 10) {
+                Image(systemName: sidebarImage(for: section))
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(DashColor.muted)
+                Text("No \(sidebarTitle(for: section).lowercased())")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(DashColor.tertiary)
             }
-            .frame(height: dashboardTileHeight)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .onAppear {
                 session.ensureDashboardSectionLoaded(section)
             }
@@ -316,6 +328,35 @@ struct BrowserDashboardPage: View {
         case .securityNotifications: return "lock.shield"
         case .promotions: return "megaphone"
         case .spam: return "exclamationmark.octagon"
+        }
+    }
+
+    private func dashboardSectionCount(for section: BrowserMailDashboardSection, in dashboard: BrowserMailDashboard) -> Int {
+        switch section {
+        case .shipments:
+            return dashboard.shipments.count
+        case .subscriptions:
+            return dashboard.subscriptions.count
+        case .orders:
+            return dashboard.orders.count
+        case .securityCodes:
+            return dashboard.securityCodes.count
+        case .notifications:
+            return dashboard.notifications.count
+        case .supportThreads:
+            return dashboard.supportThreads.count
+        case .invoices:
+            return dashboard.invoices.count
+        case .bookings:
+            return dashboard.bookings.count
+        case .meetingsEvents:
+            return dashboard.meetingsEvents.count
+        case .securityNotifications:
+            return dashboard.securityNotifications.count
+        case .promotions:
+            return dashboard.promotions.count
+        case .spam:
+            return dashboard.spam.count
         }
     }
 
@@ -381,34 +422,30 @@ struct BrowserDashboardPage: View {
         let activeShipments = sortedShipments.filter { !isDeliveredShipment($0) }
         let deliveredShipments = sortedShipments.filter(isDeliveredShipment)
 
-        return DashCard {
-            DashSectionHeader(title: "Shipping", count: "\(shipments.count)", systemImage: "shippingbox")
-
-            ScrollView(.vertical) {
-                VStack(alignment: .leading, spacing: 16) {
-                    if !activeShipments.isEmpty {
-                        shipmentGroup(
-                            title: "Ordered / on the way",
-                            shipments: activeShipments,
-                            highlightsArriving: true
-                        )
-                    }
-
-                    if !deliveredShipments.isEmpty {
-                        shipmentGroup(
-                            title: "Delivered",
-                            shipments: deliveredShipments,
-                            highlightsArriving: false
-                        )
-                    }
-
-                    dashboardPagingFooter(for: section)
+        return ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 16) {
+                if !activeShipments.isEmpty {
+                    shipmentGroup(
+                        title: "Ordered / on the way",
+                        shipments: activeShipments,
+                        highlightsArriving: true
+                    )
                 }
-                .padding(.trailing, 2)
+
+                if !deliveredShipments.isEmpty {
+                    shipmentGroup(
+                        title: "Delivered",
+                        shipments: deliveredShipments,
+                        highlightsArriving: false
+                    )
+                }
+
+                dashboardPaginationSentinel(for: section)
             }
-            .padding(.top, 13)
+            .padding(.trailing, 2)
+            .padding(.bottom, 16)
         }
-        .frame(height: dashboardTileHeight)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private func subscriptionsCard(_ subs: [BrowserMailSubscriptionSummary], section: BrowserMailDashboardSection) -> some View {
@@ -416,26 +453,22 @@ struct BrowserDashboardPage: View {
         let activeSubscriptions = sortedSubscriptions.filter { !isPastSubscription($0) }
         let pastSubscriptions = sortedSubscriptions.filter(isPastSubscription)
 
-        return DashCard {
-            DashSectionHeader(title: "Subscriptions", count: "\(subs.count)", systemImage: "arrow.triangle.2.circlepath")
-            ScrollView(.vertical) {
-                VStack(alignment: .leading, spacing: 16) {
-                    if !activeSubscriptions.isEmpty {
-                        subscriptionGroup(title: "Active", subscriptions: activeSubscriptions)
-                    }
-
-                    if !pastSubscriptions.isEmpty {
-                        subscriptionGroup(title: "Past", subscriptions: pastSubscriptions)
-                    }
-
-                    dashboardPagingFooter(for: section)
+        return ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 16) {
+                if !activeSubscriptions.isEmpty {
+                    subscriptionGroup(title: "Active", subscriptions: activeSubscriptions)
                 }
-                .padding(.trailing, 2)
+
+                if !pastSubscriptions.isEmpty {
+                    subscriptionGroup(title: "Past", subscriptions: pastSubscriptions)
+                }
+
+                dashboardPaginationSentinel(for: section)
             }
-            .padding(.top, 14)
+            .padding(.trailing, 2)
+            .padding(.bottom, 16)
         }
-        .frame(height: dashboardTileHeight)
-        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private func shipmentGroup(
@@ -490,119 +523,111 @@ struct BrowserDashboardPage: View {
     }
 
     private func securityCodesCard(_ codes: [BrowserMailSecurityCode], section: BrowserMailDashboardSection) -> some View {
-        DashCard {
-            DashSectionHeader(title: "Security codes", count: "\(codes.count)", systemImage: "key.horizontal")
-            ScrollView(.vertical) {
-                VStack(spacing: 10) {
-                    ForEach(sortedSecurityCodes(codes)) { code in
-                        DashInfoRow(
-                            systemImage: "number",
-                            title: code.serviceName ?? "Security code",
-                            detail: code.message?.subject ?? "One-time code",
-                            tag: code.code,
-                            date: code.message?.displayDate ?? date(fromMilliseconds: code.updatedAt),
-                            tagStyle: .accent
-                        ) {
-                            selectedMessage = code.message
-                        }
+        ScrollView(.vertical) {
+            VStack(spacing: 10) {
+                ForEach(sortedSecurityCodes(codes)) { code in
+                    DashInfoRow(
+                        systemImage: "number",
+                        title: code.serviceName ?? "Security code",
+                        detail: code.message?.subject ?? "One-time code",
+                        tag: code.code,
+                        date: code.message?.displayDate ?? date(fromMilliseconds: code.updatedAt),
+                        tagStyle: .accent
+                    ) {
+                        selectedMessage = code.message
                     }
-                    dashboardPagingFooter(for: section)
                 }
-                .padding(.trailing, 2)
+                dashboardPaginationSentinel(for: section)
             }
-            .padding(.top, 14)
+            .padding(.trailing, 2)
+            .padding(.bottom, 16)
         }
-        .frame(height: dashboardTileHeight)
-        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private func notificationsCard(_ notifications: [BrowserMailNotification], section: BrowserMailDashboardSection) -> some View {
-        DashCard {
-            DashSectionHeader(title: "Notifications", count: "\(notifications.count)", systemImage: "bell.badge")
-            ScrollView(.vertical) {
-                VStack(spacing: 10) {
-                    ForEach(sortedNotifications(notifications)) { notification in
-                        DashInfoRow(
-                            systemImage: "bell",
-                            title: notification.title ?? notification.serviceName ?? dashboardTitle(notification.notificationType),
-                            detail: [notification.serviceName, notification.url].compactMap { $0 }.joined(separator: " · "),
-                            tag: notification.status == "unknown" ? dashboardTitle(notification.notificationType) : notification.status,
-                            date: notification.message?.displayDate ?? date(fromMilliseconds: notification.occurredAt ?? notification.updatedAt)
-                        ) {
-                            selectedMessage = notification.message
-                        }
+        ScrollView(.vertical) {
+            VStack(spacing: 10) {
+                ForEach(sortedNotifications(notifications)) { notification in
+                    DashInfoRow(
+                        systemImage: "bell",
+                        title: notification.title ?? notification.serviceName ?? dashboardTitle(notification.notificationType),
+                        detail: [notification.serviceName, notification.url].compactMap { $0 }.joined(separator: " · "),
+                        tag: notification.status == "unknown" ? dashboardTitle(notification.notificationType) : notification.status,
+                        date: notification.message?.displayDate ?? date(fromMilliseconds: notification.occurredAt ?? notification.updatedAt)
+                    ) {
+                        selectedMessage = notification.message
                     }
-                    dashboardPagingFooter(for: section)
                 }
-                .padding(.trailing, 2)
+                dashboardPaginationSentinel(for: section)
             }
-            .padding(.top, 14)
+            .padding(.trailing, 2)
+            .padding(.bottom, 16)
         }
-        .frame(height: dashboardTileHeight)
-        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private func supportCard(_ threads: [BrowserMailSupportThreadSummary], section: BrowserMailDashboardSection) -> some View {
-        DashCard {
-            DashSectionHeader(title: "Support", count: "\(threads.count)", systemImage: "lifepreserver")
-            ScrollView(.vertical) {
-                VStack(spacing: 10) {
-                    ForEach(sortedSupportThreads(threads)) { thread in
-                        DashInfoRow(
-                            systemImage: "lifepreserver",
-                            title: thread.companyName,
-                            detail: [thread.ticketId, thread.subject].compactMap { $0 }.joined(separator: " · "),
-                            tag: thread.status,
-                            date: thread.message?.displayDate ?? date(fromMilliseconds: thread.updatedAt)
-                        ) {
-                            selectedMessage = thread.message ?? thread.messages?.first
-                        }
+        ScrollView(.vertical) {
+            VStack(spacing: 10) {
+                ForEach(sortedSupportThreads(threads)) { thread in
+                    DashInfoRow(
+                        systemImage: "lifepreserver",
+                        title: thread.companyName,
+                        detail: [thread.ticketId, thread.subject].compactMap { $0 }.joined(separator: " · "),
+                        tag: thread.status,
+                        date: thread.message?.displayDate ?? date(fromMilliseconds: thread.updatedAt)
+                    ) {
+                        selectedMessage = thread.message ?? thread.messages?.first
                     }
-                    dashboardPagingFooter(for: section)
                 }
-                .padding(.trailing, 2)
+                dashboardPaginationSentinel(for: section)
             }
-            .padding(.top, 14)
+            .padding(.trailing, 2)
+            .padding(.bottom, 16)
         }
-        .frame(height: dashboardTileHeight)
-        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private func invoicesCard(_ invoices: [BrowserMailInvoiceSummary], section: BrowserMailDashboardSection) -> some View {
         let groups = invoiceGroups(from: invoices)
 
-        return ScrollView(.vertical) {
+        return GeometryReader { proxy in
+            let panelHeight = dashboardGroupedPanelHeight(availableHeight: proxy.size.height, groupCount: groups.count)
+
             VStack(alignment: .leading, spacing: 14) {
                 ForEach(groups) { group in
-                    invoicePanel(group)
+                    invoicePanel(group, section: section)
+                        .frame(height: panelHeight)
                 }
-
-                dashboardPagingFooter(for: section)
             }
-            .padding(.trailing, 2)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .frame(height: dashboardTileHeight)
-        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
-    private func invoicePanel(_ group: InvoicePanelGroup) -> some View {
-        DashCard(fillsHeight: false) {
+    private func invoicePanel(_ group: InvoicePanelGroup, section: BrowserMailDashboardSection) -> some View {
+        DashCard {
             DashPanelHeader(title: group.title, count: group.invoices.count, systemImage: group.systemImage, tint: group.tint)
 
-            VStack(spacing: 10) {
-                ForEach(group.invoices) { invoice in
-                    DashInfoRow(
-                        systemImage: "doc.text",
-                        title: invoice.vendor ?? "Invoice",
-                        detail: [invoice.invoiceNumber, moneyText(amount: invoice.amount, currency: invoice.currency)]
-                            .compactMap { $0 }
-                            .joined(separator: " · "),
-                        tag: invoice.status,
-                        date: invoice.message?.displayDate ?? date(fromMilliseconds: invoice.updatedAt)
-                    ) {
-                        selectedMessage = invoice.message ?? invoice.messages?.first
+            ScrollView(.vertical) {
+                VStack(spacing: 10) {
+                    ForEach(group.invoices) { invoice in
+                        DashInfoRow(
+                            systemImage: "doc.text",
+                            title: invoice.vendor ?? "Invoice",
+                            detail: [invoice.invoiceNumber, moneyText(amount: invoice.amount, currency: invoice.currency)]
+                                .compactMap { $0 }
+                                .joined(separator: " · "),
+                            tag: invoice.status,
+                            date: invoice.message?.displayDate ?? date(fromMilliseconds: invoice.updatedAt)
+                        ) {
+                            selectedMessage = invoice.message ?? invoice.messages?.first
+                        }
                     }
+                    dashboardPaginationSentinel(for: section)
                 }
+                .padding(.trailing, 2)
             }
             .padding(.top, 14)
         }
@@ -612,43 +637,47 @@ struct BrowserDashboardPage: View {
     private func bookingsCard(_ bookings: [BrowserMailBookingSummary], section: BrowserMailDashboardSection) -> some View {
         let groups = bookingGroups(from: bookings)
 
-        return ScrollView(.vertical) {
+        return GeometryReader { proxy in
+            let panelHeight = dashboardGroupedPanelHeight(availableHeight: proxy.size.height, groupCount: groups.count)
+
             VStack(alignment: .leading, spacing: 14) {
                 ForEach(groups) { group in
-                    bookingPanel(group)
+                    bookingPanel(group, section: section)
+                        .frame(height: panelHeight)
                 }
-
-                dashboardPagingFooter(for: section)
             }
-            .padding(.trailing, 2)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .frame(height: dashboardTileHeight)
-        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
-    private func bookingPanel(_ group: BookingPanelGroup) -> some View {
-        DashCard(fillsHeight: false) {
+    private func bookingPanel(_ group: BookingPanelGroup, section: BrowserMailDashboardSection) -> some View {
+        DashCard {
             DashPanelHeader(title: group.title, count: group.bookings.count, systemImage: group.systemImage, tint: group.tint)
 
-            VStack(spacing: 10) {
-                ForEach(group.bookings) { booking in
-                    DashInfoRow(
-                        systemImage: group.systemImage,
-                        title: booking.title ?? booking.provider ?? dashboardTitle(booking.category),
-                        detail: [
-                            booking.confirmationNumber,
-                            booking.bookingCode,
-                            booking.location,
-                            moneyText(amount: booking.amount, currency: booking.currency)
-                        ]
-                            .compactMap { $0 }
-                            .joined(separator: " · "),
-                        tag: booking.status ?? booking.category,
-                        date: date(fromMilliseconds: booking.startTime) ?? booking.message?.displayDate ?? date(fromMilliseconds: booking.updatedAt)
-                    ) {
-                        selectedMessage = booking.message ?? booking.messages?.first
+            ScrollView(.vertical) {
+                VStack(spacing: 10) {
+                    ForEach(group.bookings) { booking in
+                        DashInfoRow(
+                            systemImage: group.systemImage,
+                            title: booking.title ?? booking.provider ?? dashboardTitle(booking.category),
+                            detail: [
+                                booking.confirmationNumber,
+                                booking.bookingCode,
+                                booking.location,
+                                moneyText(amount: booking.amount, currency: booking.currency)
+                            ]
+                                .compactMap { $0 }
+                                .joined(separator: " · "),
+                            tag: booking.status ?? booking.category,
+                            date: date(fromMilliseconds: booking.startTime) ?? booking.message?.displayDate ?? date(fromMilliseconds: booking.updatedAt)
+                        ) {
+                            selectedMessage = booking.message ?? booking.messages?.first
+                        }
                     }
+                    dashboardPaginationSentinel(for: section)
                 }
+                .padding(.trailing, 2)
             }
             .padding(.top, 14)
         }
@@ -656,29 +685,25 @@ struct BrowserDashboardPage: View {
     }
 
     private func meetingsEventsCard(_ events: [BrowserMailMeetingEventSummary], section: BrowserMailDashboardSection) -> some View {
-        DashCard {
-            DashSectionHeader(title: "Meetings & events", count: "\(events.count)", systemImage: "calendar.badge.clock")
-            ScrollView(.vertical) {
-                VStack(spacing: 10) {
-                    ForEach(sortedMeetingEvents(events)) { event in
-                        DashInfoRow(
-                            systemImage: "calendar",
-                            title: event.title ?? event.provider ?? "Event",
-                            detail: [event.provider, event.location, event.url].compactMap { $0 }.joined(separator: " · "),
-                            tag: event.status,
-                            date: date(fromMilliseconds: event.startTime) ?? event.message?.displayDate ?? date(fromMilliseconds: event.updatedAt)
+        ScrollView(.vertical) {
+            VStack(spacing: 10) {
+                ForEach(sortedMeetingEvents(events)) { event in
+                    DashInfoRow(
+                        systemImage: "calendar",
+                        title: event.title ?? event.provider ?? "Event",
+                        detail: [event.provider, event.location, event.url].compactMap { $0 }.joined(separator: " · "),
+                        tag: event.status,
+                        date: date(fromMilliseconds: event.startTime) ?? event.message?.displayDate ?? date(fromMilliseconds: event.updatedAt)
                     ) {
                         selectedMessage = event.message ?? event.messages?.first
                     }
                 }
-                    dashboardPagingFooter(for: section)
-                }
-                .padding(.trailing, 2)
+                dashboardPaginationSentinel(for: section)
             }
-            .padding(.top, 14)
+            .padding(.trailing, 2)
+            .padding(.bottom, 16)
         }
-        .frame(height: dashboardTileHeight)
-        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private func classificationCard(
@@ -687,58 +712,58 @@ struct BrowserDashboardPage: View {
         rows: [BrowserMailClassificationSummary],
         section: BrowserMailDashboardSection
     ) -> some View {
-        DashCard {
-            DashSectionHeader(title: title, count: "\(rows.count)", systemImage: systemImage)
-            ScrollView(.vertical) {
-                VStack(spacing: 10) {
-                    ForEach(sortedClassifications(rows)) { row in
-                        DashInfoRow(
-                            systemImage: systemImage,
-                            title: row.message?.subject ?? dashboardTitle(row.category),
-                            detail: [row.message?.from, row.reason].compactMap { $0 }.joined(separator: " · "),
-                            tag: dashboardTitle(row.category),
-                            date: row.message?.displayDate ?? date(fromMilliseconds: row.updatedAt)
-                        ) {
-                            selectedMessage = row.message
-                        }
+        ScrollView(.vertical) {
+            VStack(spacing: 10) {
+                ForEach(sortedClassifications(rows)) { row in
+                    DashInfoRow(
+                        systemImage: systemImage,
+                        title: row.message?.subject ?? dashboardTitle(row.category),
+                        detail: [row.message?.from, row.reason].compactMap { $0 }.joined(separator: " · "),
+                        tag: dashboardTitle(row.category),
+                        date: row.message?.displayDate ?? date(fromMilliseconds: row.updatedAt)
+                    ) {
+                        selectedMessage = row.message
                     }
-                    dashboardPagingFooter(for: section)
                 }
-                .padding(.trailing, 2)
+                dashboardPaginationSentinel(for: section)
             }
-            .padding(.top, 14)
+            .padding(.trailing, 2)
+            .padding(.bottom, 16)
         }
-        .frame(height: dashboardTileHeight)
-        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private func purchasesCard(_ orders: [BrowserMailOrderSummary], section: BrowserMailDashboardSection) -> some View {
         let groups = purchaseGroups(from: orders)
 
-        return ScrollView(.vertical) {
+        return GeometryReader { proxy in
+            let panelHeight = dashboardGroupedPanelHeight(availableHeight: proxy.size.height, groupCount: groups.count)
+
             VStack(alignment: .leading, spacing: 14) {
                 ForEach(groups) { group in
-                    purchasePanel(group)
+                    purchasePanel(group, section: section)
+                        .frame(height: panelHeight)
                 }
-
-                dashboardPagingFooter(for: section)
             }
-            .padding(.trailing, 2)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .frame(height: dashboardTileHeight)
-        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
-    private func purchasePanel(_ group: PurchasePanelGroup) -> some View {
-        DashCard(fillsHeight: false) {
+    private func purchasePanel(_ group: PurchasePanelGroup, section: BrowserMailDashboardSection) -> some View {
+        DashCard {
             DashPanelHeader(title: group.title, count: group.orders.count, systemImage: group.systemImage, tint: group.tint)
 
-            VStack(spacing: 9) {
-                ForEach(group.orders) { order in
-                    DashPurchaseRow(order: order) {
-                        selectedMessage = order.messages.first ?? order.message
+            ScrollView(.vertical) {
+                VStack(spacing: 9) {
+                    ForEach(group.orders) { order in
+                        DashPurchaseRow(order: order) {
+                            selectedMessage = order.messages.first ?? order.message
+                        }
                     }
+                    dashboardPaginationSentinel(for: section)
                 }
+                .padding(.trailing, 2)
             }
             .padding(.top, 14)
         }
@@ -748,22 +773,22 @@ struct BrowserDashboardPage: View {
     private func securityCard(_ alerts: [BrowserMailSecurityNotification], section: BrowserMailDashboardSection) -> some View {
         let groups = securityAlertGroups(from: alerts)
 
-        return ScrollView(.vertical) {
+        return GeometryReader { proxy in
+            let panelHeight = dashboardGroupedPanelHeight(availableHeight: proxy.size.height, groupCount: groups.count)
+
             VStack(alignment: .leading, spacing: 14) {
                 ForEach(groups) { group in
-                    securityEventPanel(group)
+                    securityEventPanel(group, section: section)
+                        .frame(height: panelHeight)
                 }
-
-                dashboardPagingFooter(for: section)
             }
-            .padding(.trailing, 2)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .frame(height: dashboardTileHeight)
-        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
-    private func securityEventPanel(_ group: SecurityAlertGroup) -> some View {
-        DashCard(fillsHeight: false) {
+    private func securityEventPanel(_ group: SecurityAlertGroup, section: BrowserMailDashboardSection) -> some View {
+        DashCard {
             HStack(spacing: 9) {
                 Image(systemName: group.systemImage)
                     .font(.system(size: 13, weight: .semibold))
@@ -780,24 +805,36 @@ struct BrowserDashboardPage: View {
                     .foregroundStyle(DashColor.muted)
             }
 
-            VStack(spacing: 10) {
-                ForEach(group.alerts) { alert in
-                    DashSecurityRow(alert: alert) {
-                        selectedMessage = alert.message
+            ScrollView(.vertical) {
+                VStack(spacing: 10) {
+                    ForEach(group.alerts) { alert in
+                        DashSecurityRow(alert: alert) {
+                            selectedMessage = alert.message
+                        }
                     }
+                    dashboardPaginationSentinel(for: section)
                 }
+                .padding(.trailing, 2)
             }
             .padding(.top, 14)
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
-    private func dashboardPagingFooter(for section: BrowserMailDashboardSection) -> some View {
-        DashPagingFooter(
+    private func dashboardPaginationSentinel(for section: BrowserMailDashboardSection) -> some View {
+        DashPaginationSentinel(
             hasMore: session.hasMoreDashboardSection(section),
             isLoading: session.isLoadingDashboardSection(section),
             onLoadMore: { session.loadMoreDashboardSection(section) }
         )
+        .id("\(section.rawValue)-\(session.dashboardRowsLoaded(for: section))")
+    }
+
+    private func dashboardGroupedPanelHeight(availableHeight: CGFloat, groupCount: Int) -> CGFloat {
+        let count = max(groupCount, 1)
+        let panelSpacing: CGFloat = 14
+        let verticalSpacing = CGFloat(max(count - 1, 0)) * panelSpacing
+        return max(96, (availableHeight - verticalSpacing) / CGFloat(count))
     }
 
     private func tuckedCard(promoCount: Int, spamCount: Int) -> some View {
@@ -1437,9 +1474,9 @@ private struct DashSubsectionHeader: View {
     }
 }
 
-// MARK: - Paging Footer
+// MARK: - Scroll Pagination
 
-private struct DashPagingFooter: View {
+private struct DashPaginationSentinel: View {
     let hasMore: Bool
     let isLoading: Bool
     let onLoadMore: () -> Void
@@ -1448,24 +1485,17 @@ private struct DashPagingFooter: View {
     var body: some View {
         Group {
             if hasMore {
-                HStack(spacing: 8) {
+                ZStack {
                     if isLoading {
                         ProgressView()
                             .controlSize(.small)
                             .scaleEffect(0.7)
                     } else {
-                        Circle()
-                            .fill(DashColor.muted.opacity(0.5))
-                            .frame(width: 5, height: 5)
+                        Color.clear
                     }
-                    Text(isLoading ? "Loading more" : "More")
-                        .font(.system(size: 10.5, weight: .medium))
-                        .foregroundStyle(DashColor.faint)
                 }
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, 8)
-                .contentShape(Rectangle())
-                .onTapGesture(perform: loadMoreIfPossible)
+                .frame(height: isLoading ? 28 : 1)
                 .onAppear(perform: triggerOnceForAppearance)
                 .onDisappear {
                     didTriggerForAppearance = false
