@@ -20,7 +20,11 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
     @Published private(set) var consoleMessages: [BrowserConsoleMessage] = []
     @Published private(set) var toasts: [BrowserToast] = []
     @Published private(set) var zoomHUD: BrowserZoomHUD?
-    @Published var selectedTabID: BrowserTab.ID?
+    @Published var selectedTabID: BrowserTab.ID? {
+        didSet {
+            refreshElementFullscreenState()
+        }
+    }
     @Published private(set) var profiles: [BrowserProfile] = []
     @Published private(set) var selectedProfileID: BrowserProfile.ID?
     @Published private(set) var hasLoadedStartupData = false
@@ -2164,9 +2168,7 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
     }
 
     private func refreshElementFullscreenState() {
-        isElementFullscreenActive = tabs.contains { tab in
-            tab.webView.isElementFullscreenTransitionActive
-        }
+        isElementFullscreenActive = activeTab?.webView.isElementFullscreenActiveForChrome == true
     }
 
     private func persistSession() {
