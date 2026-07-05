@@ -85,6 +85,56 @@ const CATEGORY_LABELS: Record<string, string> = {
 const DEFAULT_OPENROUTER_MODEL = "deepseek/deepseek-v4-flash";
 const DEFAULT_OPENROUTER_REASONING_EFFORT = "xhigh";
 const DEFAULT_OPENROUTER_TIMEOUT_MS = 90_000;
+const ANALYSIS_QUEUE_DRAIN_BATCH_SIZE = 25;
+const ANALYSIS_QUEUE_STALE_PENDING_MS = 15 * 60 * 1000;
+
+const modelAnalysisValidator = v.object({
+  category: v.string(),
+  confidence: v.optional(v.number()),
+  reason: v.optional(v.string()),
+  decisiveSignals: v.optional(v.array(v.string())),
+  possibleAlternativeCategories: v.optional(v.array(v.string())),
+  suggestedCategory: v.optional(v.string()),
+  notificationType: v.optional(v.string()),
+  accountEmail: v.optional(v.string()),
+  serviceName: v.optional(v.string()),
+  code: v.optional(v.string()),
+  url: v.optional(v.string()),
+  ipAddress: v.optional(v.string()),
+  location: v.optional(v.string()),
+  device: v.optional(v.string()),
+  app: v.optional(v.string()),
+  companyName: v.optional(v.string()),
+  ticketId: v.optional(v.string()),
+  status: v.optional(v.string()),
+  merchant: v.optional(v.string()),
+  orderNumber: v.optional(v.string()),
+  itemSummary: v.optional(v.string()),
+  imageUrl: v.optional(v.string()),
+  carrier: v.optional(v.string()),
+  trackingNumber: v.optional(v.string()),
+  trackingUrl: v.optional(v.string()),
+  vendor: v.optional(v.string()),
+  invoiceNumber: v.optional(v.string()),
+  amount: v.optional(v.number()),
+  currency: v.optional(v.string()),
+  nextPaymentDueAt: v.optional(v.string()),
+  bookingCategory: v.optional(v.string()),
+  provider: v.optional(v.string()),
+  confirmationNumber: v.optional(v.string()),
+  bookingCode: v.optional(v.string()),
+  bookingUrl: v.optional(v.string()),
+  qrCodeUrl: v.optional(v.string()),
+  ticketUrl: v.optional(v.string()),
+  title: v.optional(v.string()),
+  startTime: v.optional(v.string()),
+  endTime: v.optional(v.string()),
+  occurredAt: v.optional(v.string()),
+  missingButExpectedFields: v.optional(v.array(v.string())),
+  mergeTargetId: v.optional(v.string()),
+  mergeDecisionReason: v.optional(v.string()),
+  mergeConfidence: v.optional(v.number()),
+});
 
 export const analyzeGmailMessage = internalMutation({
   args: {
@@ -97,6 +147,7 @@ export const analyzeGmailMessage = internalMutation({
     }
 
     await clearMessageAnalysis(ctx, args.gmailMessageId);
+    await upsertAnalysisQueuePending(ctx, message);
     await ctx.scheduler.runAfter(0, internal.mailAnalysis.analyzeGmailMessageWithModel, {
       gmailMessageId: message._id,
     });
@@ -119,7 +170,7 @@ export const analyzeGmailMessageWithModel = internalAction({
 
     const baselineAnalysis = gmailLabelBaselineAnalysis(message);
     if (baselineAnalysis) {
-      await ctx.runMutation(internal.mailAnalysis.applyModelAnalysis, {
+      await ctx.runMutation(internal.mailAnalysis.markAnalysisReady, {
         gmailMessageId: args.gmailMessageId,
         analysis: baselineAnalysis,
         model: "gmail-label-baseline",
@@ -131,7 +182,7 @@ export const analyzeGmailMessageWithModel = internalAction({
     const apiKey = process.env.OPENROUTER_API_KEY;
     if (!apiKey) {
       const analysis = fallbackAnalysisForModelFailure(message, "OPENROUTER_API_KEY is not configured.");
-      await ctx.runMutation(internal.mailAnalysis.applyModelAnalysis, {
+      await ctx.runMutation(internal.mailAnalysis.markAnalysisReady, {
         gmailMessageId: args.gmailMessageId,
         analysis,
         model: "local-fallback",
@@ -147,7 +198,7 @@ export const analyzeGmailMessageWithModel = internalAction({
       analysis = await maybeResolveMergeTargetWithOpenRouter(ctx, apiKey, message, analysis);
     } catch (error) {
       analysis = fallbackAnalysisForModelFailure(message, errorMessage(error));
-      await ctx.runMutation(internal.mailAnalysis.applyModelAnalysis, {
+      await ctx.runMutation(internal.mailAnalysis.markAnalysisReady, {
         gmailMessageId: args.gmailMessageId,
         analysis,
         model,
@@ -156,7 +207,7 @@ export const analyzeGmailMessageWithModel = internalAction({
       return { category: analysis.category, source: "model_fallback", error: errorMessage(error) };
     }
 
-    await ctx.runMutation(internal.mailAnalysis.applyModelAnalysis, {
+    await ctx.runMutation(internal.mailAnalysis.markAnalysisReady, {
       gmailMessageId: args.gmailMessageId,
       analysis,
       model,
@@ -191,6 +242,223 @@ export const gmailMessageForModel = internalQuery({
       imageUrls: extractImageUrls(message.bodyHtml),
       internalDate: message.internalDate,
     };
+  },
+});
+
+export const markAnalysisReady = internalMutation({
+  args: {
+    gmailMessageId: v.id("gmailMessages"),
+    model: v.string(),
+    source: v.optional(v.string()),
+    analysis: modelAnalysisValidator,
+  },
+  handler: async (ctx, args) => {
+    const message = await ctx.db.get(args.gmailMessageId);
+    if (!message) {
+      return null;
+    }
+
+    const now = Date.now();
+    const existing = await ctx.db
+      .query("mailAnalysisQueue")
+      .withIndex("by_message", (q) => q.eq("gmailMessageId", message._id))
+      .unique();
+    if (existing) {
+      await ctx.db.patch(existing._id, {
+        userId: message.userId,
+        internalDate: analysisQueueDate(message),
+        status: "ready",
+        model: args.model,
+        source: args.source,
+        analysis: args.analysis,
+        updatedAt: now,
+      });
+    } else {
+      await ctx.db.insert("mailAnalysisQueue", {
+        userId: message.userId,
+        gmailMessageId: message._id,
+        internalDate: analysisQueueDate(message),
+        status: "ready",
+        model: args.model,
+        source: args.source,
+        analysis: args.analysis,
+        attempts: 0,
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+
+    await ctx.scheduler.runAfter(0, internal.mailAnalysis.drainReadyAnalysisQueue, {
+      userId: message.userId,
+    });
+    return { queued: true };
+  },
+});
+
+export const drainReadyAnalysisQueue = internalAction({
+  args: {
+    userId: v.id("users"),
+  },
+  handler: async (ctx, args) => {
+    let applied = 0;
+    let failed = 0;
+    for (let i = 0; i < ANALYSIS_QUEUE_DRAIN_BATCH_SIZE; i += 1) {
+      const next: QueuedAnalysisForApply | null = await ctx.runQuery(internal.mailAnalysis.nextAnalysisQueueItem, {
+        userId: args.userId,
+      });
+      if (!next) {
+        break;
+      }
+      if (next.status === "stale_pending") {
+        await ctx.runMutation(internal.mailAnalysis.markAnalysisQueueFailed, {
+          queueId: next.queueId,
+          error: "Analysis model result did not arrive before the ordered apply timeout.",
+        });
+        failed += 1;
+        continue;
+      }
+
+      const claimed: QueuedAnalysisForApply | null = await ctx.runMutation(internal.mailAnalysis.claimAnalysisQueueItem, {
+        queueId: next.queueId,
+      });
+      if (!claimed || !claimed.analysis || !claimed.model) {
+        continue;
+      }
+
+      try {
+        await ctx.runMutation(internal.mailAnalysis.applyModelAnalysis, {
+          gmailMessageId: claimed.gmailMessageId,
+          analysis: claimed.analysis,
+          model: claimed.model,
+          source: claimed.source,
+        });
+        await ctx.runMutation(internal.mailAnalysis.markAnalysisQueueApplied, {
+          queueId: claimed.queueId,
+        });
+        applied += 1;
+      } catch (error) {
+        await ctx.runMutation(internal.mailAnalysis.markAnalysisQueueFailed, {
+          queueId: claimed.queueId,
+          error: errorMessage(error),
+        });
+        failed += 1;
+      }
+    }
+    return { applied, failed };
+  },
+});
+
+type QueuedAnalysisForApply = {
+  queueId: Id<"mailAnalysisQueue">;
+  gmailMessageId: Id<"gmailMessages">;
+  status: "ready" | "stale_pending";
+  model?: string;
+  source?: string;
+  analysis?: ModelEmailAnalysis;
+};
+
+export const nextAnalysisQueueItem = internalQuery({
+  args: {
+    userId: v.id("users"),
+  },
+  handler: async (ctx, args): Promise<QueuedAnalysisForApply | null> => {
+    const now = Date.now();
+    const ready = await ctx.db
+      .query("mailAnalysisQueue")
+      .withIndex("by_user_status_internal_date", (q) => q.eq("userId", args.userId).eq("status", "ready"))
+      .order("asc")
+      .first();
+    if (!ready) {
+      return null;
+    }
+
+    const blockers = await Promise.all([
+      ctx.db
+        .query("mailAnalysisQueue")
+        .withIndex("by_user_status_internal_date", (q) => q.eq("userId", args.userId).eq("status", "pending_model"))
+        .order("asc")
+        .first(),
+      ctx.db
+        .query("mailAnalysisQueue")
+        .withIndex("by_user_status_internal_date", (q) => q.eq("userId", args.userId).eq("status", "applying"))
+        .order("asc")
+        .first(),
+    ]);
+    const olderBlocker = blockers
+      .filter((row): row is Doc<"mailAnalysisQueue"> => !!row && row.internalDate <= ready.internalDate)
+      .sort((lhs, rhs) => lhs.internalDate - rhs.internalDate)[0];
+    if (olderBlocker) {
+      if (now - olderBlocker.updatedAt > ANALYSIS_QUEUE_STALE_PENDING_MS) {
+        return {
+          queueId: olderBlocker._id,
+          gmailMessageId: olderBlocker.gmailMessageId,
+          status: "stale_pending",
+        };
+      }
+      return null;
+    }
+
+    return {
+      queueId: ready._id,
+      gmailMessageId: ready.gmailMessageId,
+      status: "ready",
+      model: ready.model,
+      source: ready.source,
+      analysis: ready.analysis as ModelEmailAnalysis | undefined,
+    };
+  },
+});
+
+export const claimAnalysisQueueItem = internalMutation({
+  args: {
+    queueId: v.id("mailAnalysisQueue"),
+  },
+  handler: async (ctx, args): Promise<QueuedAnalysisForApply | null> => {
+    const row = await ctx.db.get(args.queueId);
+    if (!row || row.status !== "ready") {
+      return null;
+    }
+    await ctx.db.patch(row._id, {
+      status: "applying",
+      attempts: row.attempts + 1,
+      updatedAt: Date.now(),
+    });
+    return {
+      queueId: row._id,
+      gmailMessageId: row.gmailMessageId,
+      status: "ready",
+      model: row.model,
+      source: row.source,
+      analysis: row.analysis as ModelEmailAnalysis | undefined,
+    };
+  },
+});
+
+export const markAnalysisQueueApplied = internalMutation({
+  args: {
+    queueId: v.id("mailAnalysisQueue"),
+  },
+  handler: async (ctx, args) => {
+    await ctx.db.patch(args.queueId, {
+      status: "applied",
+      updatedAt: Date.now(),
+    });
+    return { applied: true };
+  },
+});
+
+export const markAnalysisQueueFailed = internalMutation({
+  args: {
+    queueId: v.id("mailAnalysisQueue"),
+    error: v.string(),
+  },
+  handler: async (ctx, args) => {
+    await ctx.db.patch(args.queueId, {
+      status: "failed",
+      lastError: args.error,
+      updatedAt: Date.now(),
+    });
+    return { failed: true };
   },
 });
 
@@ -339,21 +607,25 @@ export const applyModelAnalysis = internalMutation({
 
     await clearMessageAnalysis(ctx, message._id);
 
+    const signalText = messageSignalText(message);
+    const fullText = messageText(message);
     let category = normalizeModelCategoryWithRequiredFields(args.analysis);
+    if (category === "bookings" && isPreparedFoodOrderMessage(message.subject ?? "", fullText, args.analysis)) {
+      category = "purchase";
+    }
     if (
       (args.analysis.startTime || args.analysis.bookingCategory) &&
       (category === "purchase" ||
         category === "shipping" ||
         category === "subscription" ||
         category === "invoice" ||
-        category === "unknown")
+        category === "unknown") &&
+      !isPreparedFoodOrderMessage(message.subject ?? "", fullText, args.analysis)
     ) {
-      category = isPaidBookingMessage(message.subject ?? "", messageText(message), args.analysis)
+      category = isPaidBookingMessage(message.subject ?? "", fullText, args.analysis)
         ? "bookings"
         : "meetings_events";
     }
-    const signalText = messageSignalText(message);
-    const fullText = messageText(message);
     if (category === "subscription" && isPromotionalBroadcastOnly(message, fullText, args.analysis)) {
       category = "promotions";
     }
@@ -469,7 +741,7 @@ export const applyModelAnalysis = internalMutation({
             orderNumber: args.analysis.orderNumber ?? null,
             itemSummary: args.analysis.itemSummary ?? args.analysis.title ?? null,
             imageUrl: bestImageUrl(args.analysis.imageUrl, imageUrls),
-            status: normalizedPurchaseStatus(category, args.analysis.status),
+            status: normalizedPurchaseStatus(category, args.analysis.status, message.subject ?? "", fullText),
             latestGmailMessageId: message._id,
             now,
           }));
@@ -503,7 +775,7 @@ export const applyModelAnalysis = internalMutation({
           orderNumber: args.analysis.orderNumber ?? null,
           itemSummary: args.analysis.itemSummary ?? args.analysis.title ?? null,
           imageUrl: bestImageUrl(args.analysis.imageUrl, imageUrls),
-          status: normalizedPurchaseStatus(category, args.analysis.status),
+          status: normalizedPurchaseStatus(category, args.analysis.status, message.subject ?? "", fullText),
           latestGmailMessageId: message._id,
           now,
         });
@@ -517,7 +789,7 @@ export const applyModelAnalysis = internalMutation({
           displaySender(message.from)) ||
         "Unknown";
       const itemSummary = args.analysis.itemSummary ?? args.analysis.title ?? subscriptionItemFromText(provider, fullText);
-      const status = normalizedSubscriptionStatus(args.analysis.status);
+      const status = normalizedSubscriptionStatus(args.analysis.status, message.subject ?? "", fullText);
       const nextPaymentDueAt = parseModelTimestamp(args.analysis.nextPaymentDueAt);
       const subscriptionId = await upsertSubscription(ctx, {
         userId: message.userId,
@@ -638,6 +910,7 @@ export const clearAllAnalysisForDev = internalMutation({
   handler: async (ctx) => {
     const tableNames = [
       "mailClassifications",
+      "mailAnalysisQueue",
       "mailSecurityCodes",
       "mailSecurityNotifications",
       "mailNotifications",
@@ -778,6 +1051,41 @@ async function latestClassificationForMessage(ctx: QueryCtx, gmailMessageId: Id<
     .withIndex("by_message_and_category", (q) => q.eq("gmailMessageId", gmailMessageId))
     .collect();
   return rows.sort((lhs, rhs) => rhs.updatedAt - lhs.updatedAt)[0] ?? null;
+}
+
+async function upsertAnalysisQueuePending(ctx: MutationCtx, message: MessageDoc) {
+  const now = Date.now();
+  const existing = await ctx.db
+    .query("mailAnalysisQueue")
+    .withIndex("by_message", (q) => q.eq("gmailMessageId", message._id))
+    .unique();
+  const pendingRow = {
+    userId: message.userId,
+    internalDate: analysisQueueDate(message),
+    status: "pending_model",
+    analysis: undefined,
+    model: undefined,
+    source: undefined,
+    lastError: undefined,
+    updatedAt: now,
+  };
+  if (existing) {
+    await ctx.db.patch(existing._id, pendingRow);
+    return existing._id;
+  }
+  return await ctx.db.insert("mailAnalysisQueue", {
+    userId: message.userId,
+    gmailMessageId: message._id,
+    internalDate: analysisQueueDate(message),
+    status: "pending_model",
+    attempts: 0,
+    createdAt: now,
+    updatedAt: now,
+  });
+}
+
+function analysisQueueDate(message: Pick<MessageDoc, "internalDate" | "date" | "importedAt">) {
+  return message.internalDate ?? message.date ?? message.importedAt;
 }
 
 async function clearMessageAnalysis(ctx: MutationCtx, gmailMessageId: Id<"gmailMessages">) {
@@ -1142,15 +1450,74 @@ function isPaidBookingMessage(
     ticketUrl?: string;
     qrCodeUrl?: string;
     amount?: number;
+    merchant?: string;
+    provider?: string;
+    serviceName?: string;
+    title?: string;
+    itemSummary?: string;
+    orderNumber?: string;
   },
 ) {
   const combined = `${subject}\n${text}`;
+  if (isPreparedFoodOrderMessage(subject, text, analysis)) {
+    return false;
+  }
+  if (analysis.bookingCode || analysis.bookingUrl || analysis.ticketUrl || analysis.qrCodeUrl) {
+    return true;
+  }
+  if (
+    analysis.confirmationNumber &&
+    /\b(ticket|booking|reservation|reserved|itinerary|boarding pass|rental|hotel|appointment|experience|event|table)\b/i.test(combined)
+  ) {
+    return true;
+  }
   return (
-    Boolean(analysis.confirmationNumber || analysis.bookingCode || analysis.bookingUrl || analysis.ticketUrl || analysis.qrCodeUrl || analysis.amount) ||
-    /\b(ticket|booking|reservation|confirmation|itinerary|boarding pass|rental|hotel|restaurant|appointment|receipt|paid|payment|order)\b/i.test(
+    /\b(ticket|booking|reservation|reserved|itinerary|boarding pass|rental|hotel|appointment|experience|event|table for|dining reservation)\b/i.test(
       combined,
     )
   );
+}
+
+function isPreparedFoodOrderMessage(
+  subject: string,
+  text: string,
+  analysis: {
+    merchant?: string;
+    provider?: string;
+    serviceName?: string;
+    title?: string;
+    itemSummary?: string;
+    orderNumber?: string;
+  },
+) {
+  const combined = [
+    subject,
+    text,
+    analysis.merchant,
+    analysis.provider,
+    analysis.serviceName,
+    analysis.title,
+    analysis.itemSummary,
+  ]
+    .filter((value): value is string => typeof value === "string" && value.length > 0)
+    .join("\n");
+  if (
+    /\b(table reservation|reservation confirmed|dining reservation|booked a table|your table|party of \d+|appointment|ticket|itinerary|boarding pass|hotel confirmation|flight confirmation|rental confirmation)\b/i.test(
+      combined,
+    )
+  ) {
+    return false;
+  }
+  const foodSignal =
+    /\b(food|meal|restaurant|cafe|caf[eé]|coffee|pizza|burger|sushi|taco|noodles?|ramen|bakery|takeaway|takeout|ubereats|uber eats|doordash|door dash|deliveroo|menulog|grubhub|toast|slice|domino'?s|mcdonald'?s|kfc|subway|chipotle|starbucks)\b/i.test(
+      combined,
+    );
+  const orderSignal =
+    Boolean(analysis.orderNumber) ||
+    /\b(order|receipt|paid|payment|purchase|total|ready for (pickup|pick up|collection)|ready to (pickup|pick up|collect)|pickup|pick up|collection|delivery|delivered|takeaway|takeout)\b/i.test(
+      combined,
+    );
+  return foodSignal && orderSignal;
 }
 
 function isSecurityNotification(
@@ -1667,7 +2034,7 @@ async function upsertSubscription(
       amount: args.amount ?? existing.amount,
       currency: args.currency ?? existing.currency,
       nextPaymentDueAt: args.nextPaymentDueAt ?? existing.nextPaymentDueAt,
-      status: args.status === "unknown" ? existing.status : args.status,
+      status: preferSubscriptionStatus(args.status, existing.status),
       latestGmailMessageId: args.latestGmailMessageId,
       updatedAt: args.now,
     });
@@ -2540,6 +2907,21 @@ function fallbackAnalysisForModelFailure(message: MessageForModel, failure: stri
     };
   }
 
+  if (isPreparedFoodOrderMessage(subject, fullText, { merchant: sender, provider: sender })) {
+    const amount = extractAmount(fullText);
+    return {
+      category: "purchase",
+      confidence: 0.65,
+      reason,
+      merchant: sender,
+      orderNumber: extractOrderNumber(subject, fullText) ?? undefined,
+      itemSummary: subject || undefined,
+      amount: amount?.amount,
+      currency: amount?.currency,
+      status: normalizedPurchaseStatus("purchase", undefined, subject, fullText),
+    };
+  }
+
   const booking = extractBooking(subject, fullText, sender);
   if (booking && isPaidBookingMessage(subject, fullText, booking)) {
     return {
@@ -2699,7 +3081,7 @@ subscription:
 An email about a subscription, membership, recurring plan, recurring billing, renewal, trial, cancellation, pause, plan change, payment failure for a subscription, or automated recurring order/repeat delivery that the user has, just started, is renewing, is cancelling, or is being charged for. This includes physical repeat deliveries and autoship orders.
 
 purchase:
-A one-time order, purchase confirmation, receipt, or transaction that is not recurring, not a subscription, not primarily a shipment update, and not a booking/event.
+A one-time order, purchase confirmation, receipt, or transaction that is not recurring, not a subscription, not primarily a shipment update, and not a booking/event. Food, restaurant, takeaway, takeout, pickup, and delivery orders are purchases even when they include a pickup/delivery time.
 
 shipping:
 A parcel, delivery, tracking, shipment, courier, delivered, out-for-delivery, delayed, or pickup notification for a physical item. Prefer shipping over purchase when the email's main purpose is delivery status.
@@ -2708,7 +3090,7 @@ invoice:
 An invoice, bill, receipt, payment confirmation, payment failure, tax invoice, statement, refund, charge, payout, or payment request. If the payment is clearly for a subscription, choose subscription instead.
 
 bookings:
-Paid or reserved booking-style items: travel, rentals, restaurants, ticketed events, paid experiences, appointments, confirmations, or reservations. Extract booking code, QR URL, ticket/link, confirmation number, location, and event date when present.
+Paid or reserved booking-style items: travel, rentals, restaurant table reservations, ticketed events, paid experiences, appointments, confirmations, or reservations. Extract booking code, QR URL, ticket/link, confirmation number, location, and event date when present. Do not use bookings for food pickup/delivery/takeaway orders; those are purchases.
 
 meetings_events:
 Unpaid calendar-like meetings, friend/work activities, invitations, work meetings, social plans, and non-transactional events.
@@ -2723,7 +3105,7 @@ Precedence rules:
 - Gmail SPAM and CATEGORY_PROMOTIONS are handled before the model and should not reach this prompt.
 - Repeat delivery, autoship, recurring order, renewal, membership, or plan is subscription, not purchase.
 - Tracking number or delivery lifecycle status is shipping unless the main purpose is only order confirmation.
-- Paid/reserved/ticketed/confirmation events are bookings.
+- Paid/reserved/ticketed/confirmation events are bookings, but food pickup/delivery/takeaway orders are purchases.
 - Non-paid work/friend/calendar invitations are meetings_events.
 - Launch gifts, discounts, changelogs, newsletters, product updates, or sales are promotions if no personal actionable signal exists.
 - Do not invent facts.`;
@@ -2745,7 +3127,7 @@ function categoryExtractionPrompt(category: ModelCategory) {
     subscription:
       `${common} Extract subscription facts including provider, itemSummary, status, amount, currency, nextPaymentDueAt, orderNumber for repeat deliveries, imageUrl, url. Subscriptions include recurring software, memberships, trials, renewals, cancellations, failed subscription payments, and physical repeat deliveries/autoship.`,
     purchase:
-      `${common} Extract one-time purchase facts including merchant, orderNumber, itemSummary as the purchased item/items, amount, currency, imageUrl, status, url. Do not use purchase for recurring/repeat delivery or shipment status.`,
+      `${common} Extract one-time purchase facts including merchant, orderNumber, itemSummary as the purchased item/items, amount, currency, imageUrl, status, url. Food pickup/delivery/takeaway orders are purchases; use status like pickup_scheduled or ready_for_pickup when explicit. Do not use purchase for recurring/repeat delivery or shipment status.`,
     shipping:
       `${common} Extract shipping facts including merchant, carrier, trackingNumber, trackingUrl, orderNumber, itemSummary, imageUrl, status, url, startTime or endTime only if explicitly delivery-related.`,
     invoice:
@@ -3031,16 +3413,48 @@ function parseModelTimestamp(value?: string) {
   return Number.isFinite(timestamp) ? timestamp : undefined;
 }
 
-function normalizedPurchaseStatus(category: ModelCategory, value?: string) {
+function normalizedPurchaseStatus(category: ModelCategory, value?: string, subject = "", text = "") {
+  const combined = `${value ?? ""}\n${subject}\n${text}`;
   const normalized = value?.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
+  if (category === "purchase") {
+    if (/\bready for (pickup|pick up|collection)|ready to (pickup|pick up|collect)|pickup ready|collection ready\b/i.test(combined)) {
+      return "ready_for_pickup";
+    }
+    if (/\bpickup (scheduled|confirmed)|pick up (at|by|from)|collection (scheduled|confirmed|time)|ready (at|by)\b/i.test(combined)) {
+      return "pickup_scheduled";
+    }
+    if (/\bcancell?ed|refunded\b/i.test(combined)) {
+      return "cancelled";
+    }
+    if (/\border (confirmed|received|placed)|thanks for your order|we'?ve got your order\b/i.test(combined)) {
+      return "ordered";
+    }
+  }
   if (normalized && normalized !== "unknown") {
     return normalized;
   }
   return category === "purchase" ? "ordered" : "unknown";
 }
 
-function normalizedSubscriptionStatus(value?: string) {
+function normalizedSubscriptionStatus(value?: string, subject = "", text = "") {
+  const combined = `${value ?? ""}\n${subject}\n${text}`;
   const normalized = value?.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
+
+  if (/\b(cancell?ed|cancellation|subscription ended|membership ended|plan ended|expired|terminated)\b/i.test(combined)) {
+    return "cancelled";
+  }
+  if (/\b(paused|pause confirmed)\b/i.test(combined)) {
+    return "paused";
+  }
+  if (/\b(past due|payment failed|failed payment|payment declined|declined|unsuccessful payment)\b/i.test(combined)) {
+    return "payment_failed";
+  }
+  if (normalized === "cancel" || normalized === "cancellation" || normalized === "canceled") {
+    return "cancelled";
+  }
+  if (normalized === "past_due" || normalized === "overdue" || normalized === "payment_declined") {
+    return "payment_failed";
+  }
   return normalized && normalized !== "unknown" ? normalized : "active";
 }
 
@@ -3065,6 +3479,33 @@ function preferBookingStatus(candidate: string, current?: string) {
     return current;
   }
   return bookingStatusRank(candidate) >= bookingStatusRank(current) ? candidate : current;
+}
+
+function preferSubscriptionStatus(candidate: string, current?: string) {
+  if (!current || current === "unknown") {
+    return candidate;
+  }
+  if (!candidate || candidate === "unknown") {
+    return current;
+  }
+  return subscriptionStatusRank(candidate) >= subscriptionStatusRank(current) ? candidate : current;
+}
+
+function subscriptionStatusRank(value: string) {
+  const normalized = normalizedEntityKey("status", value);
+  if (
+    normalized.includes("cancel") ||
+    normalized.includes("expired") ||
+    normalized.includes("ended") ||
+    normalized.includes("inactive") ||
+    normalized.includes("terminated")
+  ) {
+    return 4;
+  }
+  if (normalized.includes("paused")) return 3;
+  if (normalized.includes("payment:failed") || normalized.includes("past:due") || normalized.includes("failed")) return 2;
+  if (normalized.includes("trial") || normalized.includes("active")) return 1;
+  return 0;
 }
 
 function bookingStatusRank(value: string) {

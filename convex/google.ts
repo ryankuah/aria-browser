@@ -26,6 +26,9 @@ const DEFAULT_GMAIL_BACKFILL_QUERY = "newer_than:365d";
 const MAX_GMAIL_BACKFILL_MAX_PAGES = 2000;
 const GMAIL_BACKFILL_PAGE_SIZE = 100;
 const GMAIL_BACKFILL_FETCH_CONCURRENCY = 10;
+const GMAIL_HISTORY_PAGE_SIZE = 500;
+const GMAIL_WATCH_RENEWAL_LEEWAY_MS = 24 * 60 * 60 * 1000;
+const GMAIL_WATCH_RENEWAL_BATCH_SIZE = 100;
 
 export const connectedAccounts = query({
   args: { sessionToken: v.string() },
@@ -163,6 +166,9 @@ export const upsertGoogleAccount = internalMutation({
 export const initialGoogleImport = internalAction({
   args: { googleAccountId: v.id("googleAccounts") },
   handler: async (ctx, args) => {
+    if (optionalEnv("GOOGLE_GMAIL_PUBSUB_TOPIC")) {
+      await ctx.runAction(internal.google.watchGmail, { googleAccountId: args.googleAccountId });
+    }
     await ctx.runAction(internal.google.syncGmail, { googleAccountId: args.googleAccountId, historyId: undefined });
     const account = await ctx.runQuery(api.mail.googleAccountForSync, { googleAccountId: args.googleAccountId });
     await ctx.runMutation(internal.google.startGmailBackfillForAccount, {
@@ -180,25 +186,95 @@ export const syncGmail = internalAction({
     googleAccountId: v.id("googleAccounts"),
     historyId: v.optional(v.string()),
   },
+  handler: async (ctx, args): Promise<GmailSyncActionResult> => {
+    const account: GoogleAccountForSync = await ctx.runQuery(api.mail.googleAccountForSync, { googleAccountId: args.googleAccountId });
+    const accessToken = await validAccessToken(ctx, account);
+    const state: Doc<"gmailSyncState"> | null = await ctx.runQuery(internal.google.gmailSyncStateForAccount, {
+      googleAccountId: args.googleAccountId,
+    });
+    const startHistoryId: string | undefined = state?.historyId;
+    const notificationHistoryId: string | undefined = args.historyId;
+
+    await ctx.runMutation(internal.google.markGmailSyncRunning, {
+      googleAccountId: args.googleAccountId,
+      notificationHistoryId,
+    });
+
+    try {
+      if (startHistoryId && notificationHistoryId && compareHistoryIds(notificationHistoryId, startHistoryId) <= 0) {
+        await ctx.runMutation(internal.google.saveGmailSyncState, {
+          googleAccountId: args.googleAccountId,
+          gmailSyncStatus: "idle",
+          lastGmailSyncCompletedAt: Date.now(),
+          lastGmailSyncError: null,
+        });
+        return { importedCount: 0, skipped: "stale_notification" };
+      }
+
+      const result: ImportedGmailBatch = startHistoryId
+        ? await importGmailHistory(ctx, account.userId, args.googleAccountId, accessToken, startHistoryId)
+        : await importRecentGmailMessages(ctx, account.userId, args.googleAccountId, accessToken);
+      const nextHistoryId = highestHistoryId(result.historyId, notificationHistoryId, startHistoryId);
+
+      await ctx.runMutation(internal.google.saveGmailSyncState, {
+        googleAccountId: args.googleAccountId,
+        historyId: nextHistoryId,
+        gmailSyncStatus: "idle",
+        lastGmailSyncCompletedAt: Date.now(),
+        lastGmailSyncError: null,
+      });
+      return { importedCount: result.importedCount, historyId: nextHistoryId };
+    } catch (error) {
+      if (startHistoryId && error instanceof GoogleApiError && error.status === 404) {
+        const result: ImportedGmailBatch = await importRecentGmailMessages(ctx, account.userId, args.googleAccountId, accessToken);
+        const nextHistoryId = highestHistoryId(result.historyId, notificationHistoryId, startHistoryId);
+        await ctx.runMutation(internal.google.saveGmailSyncState, {
+          googleAccountId: args.googleAccountId,
+          historyId: nextHistoryId,
+          gmailSyncStatus: "idle",
+          lastGmailSyncCompletedAt: Date.now(),
+          lastGmailSyncError: null,
+        });
+        return { importedCount: result.importedCount, historyId: nextHistoryId, recoveredFromExpiredHistory: true };
+      }
+
+      await ctx.runMutation(internal.google.saveGmailSyncState, {
+        googleAccountId: args.googleAccountId,
+        gmailSyncStatus: "failed",
+        lastGmailSyncError: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
+  },
+});
+
+export const watchGmail = internalAction({
+  args: { googleAccountId: v.id("googleAccounts") },
   handler: async (ctx, args) => {
     const account = await ctx.runQuery(api.mail.googleAccountForSync, { googleAccountId: args.googleAccountId });
     const accessToken = await validAccessToken(ctx, account);
-
-    const listUrl = args.historyId
-      ? `${GMAIL_BASE_URL}/history?startHistoryId=${encodeURIComponent(args.historyId)}&historyTypes=messageAdded`
-      : `${GMAIL_BASE_URL}/messages?maxResults=25`;
-    const list = await googleJson<GmailListResponse | GmailHistoryResponse>(listUrl, accessToken);
-    const messageIds = gmailMessageIds(list);
-
-    for (const messageId of messageIds) {
-      await importGmailMessage(ctx, account.userId, args.googleAccountId, messageId, accessToken, true);
+    const watch = await googleJson<GmailWatchResponse>(`${GMAIL_BASE_URL}/watch`, accessToken, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ topicName: requireEnv("GOOGLE_GMAIL_PUBSUB_TOPIC") }),
+    });
+    if (!watch.historyId) {
+      throw new Error("Gmail watch response did not include a historyId.");
     }
 
-    const latestHistoryId = "historyId" in list ? list.historyId : undefined;
     await ctx.runMutation(internal.google.saveGmailSyncState, {
       googleAccountId: args.googleAccountId,
-      historyId: latestHistoryId,
+      historyId: watch.historyId,
+      watchExpiration: parseGoogleExpiration(watch.expiration),
+      gmailSyncStatus: "idle",
+      lastGmailSyncError: null,
     });
+
+    return {
+      googleAccountId: args.googleAccountId,
+      historyId: watch.historyId,
+      watchExpiration: parseGoogleExpiration(watch.expiration),
+    };
   },
 });
 
@@ -438,17 +514,138 @@ export const saveGmailSyncState = internalMutation({
   args: {
     googleAccountId: v.id("googleAccounts"),
     historyId: v.optional(v.string()),
+    watchExpiration: v.optional(v.number()),
+    lastNotificationHistoryId: v.optional(v.string()),
+    lastPubSubMessageId: v.optional(v.string()),
+    lastPubSubPublishedAt: v.optional(v.number()),
+    lastGmailSyncStartedAt: v.optional(v.number()),
+    lastGmailSyncCompletedAt: v.optional(v.number()),
+    lastGmailSyncError: v.optional(v.union(v.string(), v.null())),
+    gmailSyncStatus: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const existing = await ctx.db
       .query("gmailSyncState")
       .withIndex("by_account", (q) => q.eq("googleAccountId", args.googleAccountId))
       .unique();
+    const now = Date.now();
+    const patch = {
+      historyId: args.historyId ?? existing?.historyId,
+      watchExpiration: args.watchExpiration ?? existing?.watchExpiration,
+      lastNotificationHistoryId: args.lastNotificationHistoryId ?? existing?.lastNotificationHistoryId,
+      lastPubSubMessageId: args.lastPubSubMessageId ?? existing?.lastPubSubMessageId,
+      lastPubSubPublishedAt: args.lastPubSubPublishedAt ?? existing?.lastPubSubPublishedAt,
+      lastGmailSyncStartedAt: args.lastGmailSyncStartedAt ?? existing?.lastGmailSyncStartedAt,
+      lastGmailSyncCompletedAt: args.lastGmailSyncCompletedAt ?? existing?.lastGmailSyncCompletedAt,
+      lastGmailSyncError: args.lastGmailSyncError === null ? undefined : args.lastGmailSyncError ?? existing?.lastGmailSyncError,
+      gmailSyncStatus: args.gmailSyncStatus ?? existing?.gmailSyncStatus,
+      updatedAt: now,
+    };
     if (existing) {
-      await ctx.db.patch(existing._id, { historyId: args.historyId ?? existing.historyId, updatedAt: Date.now() });
+      await ctx.db.patch(existing._id, patch);
     } else {
-      await ctx.db.insert("gmailSyncState", { ...args, updatedAt: Date.now() });
+      await ctx.db.insert("gmailSyncState", { googleAccountId: args.googleAccountId, ...patch });
     }
+  },
+});
+
+export const gmailSyncStateForAccount = internalQuery({
+  args: {
+    googleAccountId: v.id("googleAccounts"),
+  },
+  handler: async (ctx, args) => {
+    return await ctx.db
+      .query("gmailSyncState")
+      .withIndex("by_account", (q) => q.eq("googleAccountId", args.googleAccountId))
+      .unique();
+  },
+});
+
+export const recordGmailPubSubNotification = internalMutation({
+  args: {
+    googleAccountId: v.id("googleAccounts"),
+    historyId: v.optional(v.string()),
+    pubSubMessageId: v.optional(v.string()),
+    publishedAt: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const existing = await ctx.db
+      .query("gmailSyncState")
+      .withIndex("by_account", (q) => q.eq("googleAccountId", args.googleAccountId))
+      .unique();
+    const now = Date.now();
+    const patch = {
+      lastNotificationHistoryId: args.historyId ?? existing?.lastNotificationHistoryId,
+      lastPubSubMessageId: args.pubSubMessageId ?? existing?.lastPubSubMessageId,
+      lastPubSubPublishedAt: args.publishedAt ?? existing?.lastPubSubPublishedAt,
+      gmailSyncStatus: existing?.gmailSyncStatus === "running" ? "running" : "queued",
+      updatedAt: now,
+    };
+    if (existing) {
+      await ctx.db.patch(existing._id, patch);
+    } else {
+      await ctx.db.insert("gmailSyncState", {
+        googleAccountId: args.googleAccountId,
+        ...patch,
+      });
+    }
+    return { shouldSchedule: true };
+  },
+});
+
+export const markGmailSyncRunning = internalMutation({
+  args: {
+    googleAccountId: v.id("googleAccounts"),
+    notificationHistoryId: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const existing = await ctx.db
+      .query("gmailSyncState")
+      .withIndex("by_account", (q) => q.eq("googleAccountId", args.googleAccountId))
+      .unique();
+    const now = Date.now();
+    const patch = {
+      lastNotificationHistoryId: args.notificationHistoryId ?? existing?.lastNotificationHistoryId,
+      lastGmailSyncStartedAt: now,
+      gmailSyncStatus: "running",
+      lastGmailSyncError: undefined,
+      updatedAt: now,
+    };
+    if (existing) {
+      await ctx.db.patch(existing._id, patch);
+    } else {
+      await ctx.db.insert("gmailSyncState", {
+        googleAccountId: args.googleAccountId,
+        ...patch,
+      });
+    }
+  },
+});
+
+export const renewExpiringGmailWatches = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    if (!optionalEnv("GOOGLE_GMAIL_PUBSUB_TOPIC")) {
+      return { scheduled: 0, skipped: "missing_pubsub_topic" };
+    }
+
+    const threshold = Date.now() + GMAIL_WATCH_RENEWAL_LEEWAY_MS;
+    const states = await ctx.db.query("gmailSyncState").withIndex("by_watch_expiration").order("asc").take(GMAIL_WATCH_RENEWAL_BATCH_SIZE);
+    let scheduled = 0;
+    for (const state of states) {
+      if (state.watchExpiration && state.watchExpiration > threshold) {
+        continue;
+      }
+      const account = await ctx.db.get(state.googleAccountId);
+      if (!account) {
+        continue;
+      }
+      await ctx.scheduler.runAfter(0, internal.google.watchGmail, {
+        googleAccountId: state.googleAccountId,
+      });
+      scheduled += 1;
+    }
+    return { scheduled };
   },
 });
 
@@ -819,7 +1016,7 @@ async function importGmailMessage(
   });
 
   if (!importAttachments) {
-    return;
+    return parsed.historyId;
   }
 
   for (const attachment of parsed.attachments) {
@@ -842,6 +1039,60 @@ async function importGmailMessage(
       storageId,
     });
   }
+  return parsed.historyId;
+}
+
+async function importGmailHistory(
+  ctx: ActionCtx,
+  userId: Id<"users">,
+  googleAccountId: Id<"googleAccounts">,
+  accessToken: string,
+  startHistoryId: string,
+) {
+  const messageIds = new Set<string>();
+  let pageToken: string | undefined;
+  let latestHistoryId: string | undefined;
+
+  do {
+    const url = new URL(`${GMAIL_BASE_URL}/history`);
+    url.searchParams.set("startHistoryId", startHistoryId);
+    url.searchParams.set("historyTypes", "messageAdded");
+    url.searchParams.set("maxResults", String(GMAIL_HISTORY_PAGE_SIZE));
+    if (pageToken) {
+      url.searchParams.set("pageToken", pageToken);
+    }
+    const page = await googleJson<GmailHistoryResponse>(url.toString(), accessToken);
+    latestHistoryId = highestHistoryId(latestHistoryId, page.historyId);
+    for (const messageId of gmailMessageIds(page)) {
+      messageIds.add(messageId);
+    }
+    pageToken = page.nextPageToken;
+  } while (pageToken);
+
+  let importedCount = 0;
+  for (const messageId of messageIds) {
+    await importGmailMessage(ctx, userId, googleAccountId, messageId, accessToken, true);
+    importedCount += 1;
+  }
+
+  return { importedCount, historyId: latestHistoryId };
+}
+
+async function importRecentGmailMessages(
+  ctx: ActionCtx,
+  userId: Id<"users">,
+  googleAccountId: Id<"googleAccounts">,
+  accessToken: string,
+) {
+  const list = await googleJson<GmailListResponse>(`${GMAIL_BASE_URL}/messages?maxResults=25`, accessToken);
+  let latestHistoryId: string | undefined;
+  let importedCount = 0;
+  for (const messageId of gmailMessageIds(list)) {
+    const historyId = await importGmailMessage(ctx, userId, googleAccountId, messageId, accessToken, true);
+    latestHistoryId = highestHistoryId(latestHistoryId, historyId);
+    importedCount += 1;
+  }
+  return { importedCount, historyId: latestHistoryId };
 }
 
 async function syncCalendarEvents(
@@ -914,20 +1165,36 @@ async function googleTokenRequest(body: URLSearchParams): Promise<GoogleTokenRes
   return (await response.json()) as GoogleTokenResponse;
 }
 
-async function googleJson<T>(url: string, accessToken: string): Promise<T> {
-  const response = await fetch(url, { headers: { authorization: `Bearer ${accessToken}` } });
+async function googleJson<T>(url: string, accessToken: string, init?: RequestInit): Promise<T> {
+  const headers = new Headers(init?.headers);
+  headers.set("authorization", `Bearer ${accessToken}`);
+  const response = await fetch(url, { ...init, headers });
   if (!response.ok) {
-    throw new Error(`Google read request failed: ${response.status} ${url}`);
+    throw new GoogleApiError(response.status, `Google request failed: ${response.status} ${url}`);
   }
   return (await response.json()) as T;
 }
 
+class GoogleApiError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
 function requireEnv(name: string): string {
-  const value = process.env[name];
+  const value = optionalEnv(name);
   if (!value) {
     throw new Error(`${name} is required.`);
   }
   return value;
+}
+
+function optionalEnv(name: string): string | undefined {
+  const value = process.env[name]?.trim();
+  return value && value.length > 0 ? value : undefined;
 }
 
 async function encryptionKey() {
@@ -991,6 +1258,28 @@ function gmailMessageIds(response: GmailListResponse | GmailHistoryResponse) {
     }
   }
   return [...ids];
+}
+
+function highestHistoryId(...values: Array<string | undefined>) {
+  return values.filter((value): value is string => Boolean(value)).sort(compareHistoryIds).at(-1);
+}
+
+function compareHistoryIds(lhs: string, rhs: string) {
+  try {
+    const left = BigInt(lhs);
+    const right = BigInt(rhs);
+    return left < right ? -1 : left > right ? 1 : 0;
+  } catch {
+    return lhs.localeCompare(rhs);
+  }
+}
+
+function parseGoogleExpiration(value?: string) {
+  if (!value) {
+    return undefined;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function parseGmailMessage(message: GmailMessage) {
@@ -1070,6 +1359,16 @@ type GoogleAccountForSync = {
   accessTokenExpiresAt?: number;
 };
 
+type ImportedGmailBatch = {
+  importedCount: number;
+  historyId?: string;
+};
+
+type GmailSyncActionResult = ImportedGmailBatch & {
+  skipped?: string;
+  recoveredFromExpiredHistory?: boolean;
+};
+
 type GoogleTokenResponse = {
   access_token: string;
   expires_in?: number;
@@ -1085,6 +1384,11 @@ type GmailListResponse = {
 type GmailHistoryResponse = {
   historyId?: string;
   history?: Array<{ messagesAdded?: Array<{ message?: { id?: string } }> }>;
+  nextPageToken?: string;
+};
+type GmailWatchResponse = {
+  historyId?: string;
+  expiration?: string;
 };
 type GmailMessage = {
   id: string;

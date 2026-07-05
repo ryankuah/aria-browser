@@ -1112,12 +1112,6 @@ final class BrowserSessionController: ObservableObject, BrowserCloudSynchronizin
                     self.dashboardLoadingSections.remove(section)
                     self.dashboardPageCancellables[section]?.cancel()
                     self.dashboardPageCancellables[section] = nil
-
-                    if merged.insertedCount == 0, !page.isDone {
-                        DispatchQueue.main.async {
-                            self.loadMoreDashboardSection(section)
-                        }
-                    }
                 }
             )
     }

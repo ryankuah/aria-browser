@@ -377,40 +377,31 @@ struct BrowserDashboardPage: View {
     // MARK: Sections
 
     private func shipmentsSection(_ shipments: [BrowserMailShipmentSummary], section: BrowserMailDashboardSection) -> some View {
-        DashCard {
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                Text("On the way")
-                    .font(.system(size: 16, weight: .semibold))
+        let sortedShipments = shipmentsSortedByDate(shipments)
+        let activeShipments = sortedShipments.filter { !isDeliveredShipment($0) }
+        let deliveredShipments = sortedShipments.filter(isDeliveredShipment)
 
-                let arriving = shipments.filter {
-                    let s = $0.status.lowercased()
-                    return s == "out_for_delivery" || s == "out for delivery"
-                }.count
-                if arriving > 0 {
-                    HStack(spacing: 5) {
-                        Circle().fill(DashColor.amber).frame(width: 6, height: 6)
-                        Text("\(arriving) arriving today")
-                            .font(.system(size: 11.5, weight: .medium))
-                            .foregroundStyle(DashColor.amber)
-                    }
-                    .padding(.horizontal, 10).padding(.vertical, 4)
-                    .background(DashColor.amber.opacity(0.12), in: Capsule())
-                }
-                Spacer()
-                Text("\(shipments.count)")
-                    .font(.system(size: 12, weight: .semibold).monospaced())
-                    .foregroundStyle(DashColor.muted)
-            }
+        return DashCard {
+            DashSectionHeader(title: "Shipping", count: "\(shipments.count)", systemImage: "shippingbox")
 
             ScrollView(.vertical) {
-                VStack(spacing: 10) {
-                    LazyVGrid(columns: shipmentColumns, spacing: 12) {
-                        ForEach(shipments) { s in
-                            DashShipmentCard(shipment: s) {
-                                selectedMessage = s.message ?? s.messages?.first
-                            }
-                        }
+                VStack(alignment: .leading, spacing: 16) {
+                    if !activeShipments.isEmpty {
+                        shipmentGroup(
+                            title: "Ordered / on the way",
+                            shipments: activeShipments,
+                            highlightsArriving: true
+                        )
                     }
+
+                    if !deliveredShipments.isEmpty {
+                        shipmentGroup(
+                            title: "Delivered",
+                            shipments: deliveredShipments,
+                            highlightsArriving: false
+                        )
+                    }
+
                     dashboardPagingFooter(for: section)
                 }
                 .padding(.trailing, 2)
@@ -421,22 +412,22 @@ struct BrowserDashboardPage: View {
     }
 
     private func subscriptionsCard(_ subs: [BrowserMailSubscriptionSummary], section: BrowserMailDashboardSection) -> some View {
-        DashCard {
-            HStack {
-                Text("Subscriptions & renewals")
-                    .font(.system(size: 16, weight: .semibold))
-                Spacer()
-                Text("\(subs.count)")
-                    .font(.system(size: 12, weight: .semibold).monospaced())
-                    .foregroundStyle(DashColor.muted)
-            }
+        let sortedSubscriptions = subscriptionsSortedByDate(subs)
+        let activeSubscriptions = sortedSubscriptions.filter { !isPastSubscription($0) }
+        let pastSubscriptions = sortedSubscriptions.filter(isPastSubscription)
+
+        return DashCard {
+            DashSectionHeader(title: "Subscriptions", count: "\(subs.count)", systemImage: "arrow.triangle.2.circlepath")
             ScrollView(.vertical) {
-                VStack(spacing: 10) {
-                    ForEach(subs) { sub in
-                        DashSubscriptionRow(sub: sub) {
-                            selectedMessage = sub.message ?? sub.messages.first
-                        }
+                VStack(alignment: .leading, spacing: 16) {
+                    if !activeSubscriptions.isEmpty {
+                        subscriptionGroup(title: "Active", subscriptions: activeSubscriptions)
                     }
+
+                    if !pastSubscriptions.isEmpty {
+                        subscriptionGroup(title: "Past", subscriptions: pastSubscriptions)
+                    }
+
                     dashboardPagingFooter(for: section)
                 }
                 .padding(.trailing, 2)
@@ -447,12 +438,63 @@ struct BrowserDashboardPage: View {
         .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
+    private func shipmentGroup(
+        title: String,
+        shipments: [BrowserMailShipmentSummary],
+        highlightsArriving: Bool
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                DashSubsectionHeader(title: title, count: shipments.count)
+
+                if highlightsArriving {
+                    let arriving = shipments.filter(isArrivingShipment).count
+                    if arriving > 0 {
+                        HStack(spacing: 5) {
+                            Circle().fill(DashColor.amber).frame(width: 6, height: 6)
+                            Text("\(arriving) arriving today")
+                                .font(.system(size: 11.5, weight: .medium))
+                                .foregroundStyle(DashColor.amber)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(DashColor.amber.opacity(0.12), in: Capsule())
+                    }
+                }
+            }
+
+            LazyVGrid(columns: shipmentColumns, spacing: 12) {
+                ForEach(shipments) { shipment in
+                    DashShipmentCard(shipment: shipment) {
+                        selectedMessage = shipment.message ?? shipment.messages?.first
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    private func subscriptionGroup(title: String, subscriptions: [BrowserMailSubscriptionSummary]) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            DashSubsectionHeader(title: title, count: subscriptions.count)
+
+            VStack(spacing: 10) {
+                ForEach(subscriptions) { sub in
+                    DashSubscriptionRow(sub: sub) {
+                        selectedMessage = sub.message ?? sub.messages.first
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
     private func securityCodesCard(_ codes: [BrowserMailSecurityCode], section: BrowserMailDashboardSection) -> some View {
         DashCard {
             DashSectionHeader(title: "Security codes", count: "\(codes.count)", systemImage: "key.horizontal")
             ScrollView(.vertical) {
                 VStack(spacing: 10) {
-                    ForEach(codes) { code in
+                    ForEach(sortedSecurityCodes(codes)) { code in
                         DashInfoRow(
                             systemImage: "number",
                             title: code.serviceName ?? "Security code",
@@ -479,7 +521,7 @@ struct BrowserDashboardPage: View {
             DashSectionHeader(title: "Notifications", count: "\(notifications.count)", systemImage: "bell.badge")
             ScrollView(.vertical) {
                 VStack(spacing: 10) {
-                    ForEach(notifications) { notification in
+                    ForEach(sortedNotifications(notifications)) { notification in
                         DashInfoRow(
                             systemImage: "bell",
                             title: notification.title ?? notification.serviceName ?? dashboardTitle(notification.notificationType),
@@ -505,7 +547,7 @@ struct BrowserDashboardPage: View {
             DashSectionHeader(title: "Support", count: "\(threads.count)", systemImage: "lifepreserver")
             ScrollView(.vertical) {
                 VStack(spacing: 10) {
-                    ForEach(threads) { thread in
+                    ForEach(sortedSupportThreads(threads)) { thread in
                         DashInfoRow(
                             systemImage: "lifepreserver",
                             title: thread.companyName,
@@ -527,63 +569,89 @@ struct BrowserDashboardPage: View {
     }
 
     private func invoicesCard(_ invoices: [BrowserMailInvoiceSummary], section: BrowserMailDashboardSection) -> some View {
-        DashCard {
-            DashSectionHeader(title: "Invoices & payments", count: "\(invoices.count)", systemImage: "doc.text")
-            ScrollView(.vertical) {
-                VStack(spacing: 10) {
-                    ForEach(invoices) { invoice in
-                        DashInfoRow(
-                            systemImage: "doc.text",
-                            title: invoice.vendor ?? "Invoice",
-                            detail: [invoice.invoiceNumber, moneyText(amount: invoice.amount, currency: invoice.currency)]
-                                .compactMap { $0 }
-                                .joined(separator: " · "),
-                            tag: invoice.status,
-                            date: invoice.message?.displayDate ?? date(fromMilliseconds: invoice.updatedAt)
-                    ) {
-                        selectedMessage = invoice.message ?? invoice.messages?.first
-                    }
+        let groups = invoiceGroups(from: invoices)
+
+        return ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 14) {
+                ForEach(groups) { group in
+                    invoicePanel(group)
                 }
-                    dashboardPagingFooter(for: section)
-                }
-                .padding(.trailing, 2)
+
+                dashboardPagingFooter(for: section)
             }
-            .padding(.top, 14)
+            .padding(.trailing, 2)
         }
         .frame(height: dashboardTileHeight)
         .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
+    private func invoicePanel(_ group: InvoicePanelGroup) -> some View {
+        DashCard(fillsHeight: false) {
+            DashPanelHeader(title: group.title, count: group.invoices.count, systemImage: group.systemImage, tint: group.tint)
+
+            VStack(spacing: 10) {
+                ForEach(group.invoices) { invoice in
+                    DashInfoRow(
+                        systemImage: "doc.text",
+                        title: invoice.vendor ?? "Invoice",
+                        detail: [invoice.invoiceNumber, moneyText(amount: invoice.amount, currency: invoice.currency)]
+                            .compactMap { $0 }
+                            .joined(separator: " · "),
+                        tag: invoice.status,
+                        date: invoice.message?.displayDate ?? date(fromMilliseconds: invoice.updatedAt)
+                    ) {
+                        selectedMessage = invoice.message ?? invoice.messages?.first
+                    }
+                }
+            }
+            .padding(.top, 14)
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
     private func bookingsCard(_ bookings: [BrowserMailBookingSummary], section: BrowserMailDashboardSection) -> some View {
-        DashCard {
-            DashSectionHeader(title: "Bookings", count: "\(bookings.count)", systemImage: "ticket")
-            ScrollView(.vertical) {
-                VStack(spacing: 10) {
-                    ForEach(bookings) { booking in
-                        DashInfoRow(
-                            systemImage: "ticket",
-                            title: booking.title ?? booking.provider ?? dashboardTitle(booking.category),
-                            detail: [
-                                booking.confirmationNumber,
-                                booking.bookingCode,
-                                booking.location,
-                                moneyText(amount: booking.amount, currency: booking.currency)
-                            ]
-                                .compactMap { $0 }
-                                .joined(separator: " · "),
+        let groups = bookingGroups(from: bookings)
+
+        return ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 14) {
+                ForEach(groups) { group in
+                    bookingPanel(group)
+                }
+
+                dashboardPagingFooter(for: section)
+            }
+            .padding(.trailing, 2)
+        }
+        .frame(height: dashboardTileHeight)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    private func bookingPanel(_ group: BookingPanelGroup) -> some View {
+        DashCard(fillsHeight: false) {
+            DashPanelHeader(title: group.title, count: group.bookings.count, systemImage: group.systemImage, tint: group.tint)
+
+            VStack(spacing: 10) {
+                ForEach(group.bookings) { booking in
+                    DashInfoRow(
+                        systemImage: group.systemImage,
+                        title: booking.title ?? booking.provider ?? dashboardTitle(booking.category),
+                        detail: [
+                            booking.confirmationNumber,
+                            booking.bookingCode,
+                            booking.location,
+                            moneyText(amount: booking.amount, currency: booking.currency)
+                        ]
+                            .compactMap { $0 }
+                            .joined(separator: " · "),
                         tag: booking.status ?? booking.category,
-                            date: date(fromMilliseconds: booking.startTime) ?? booking.message?.displayDate ?? date(fromMilliseconds: booking.updatedAt)
+                        date: date(fromMilliseconds: booking.startTime) ?? booking.message?.displayDate ?? date(fromMilliseconds: booking.updatedAt)
                     ) {
                         selectedMessage = booking.message ?? booking.messages?.first
                     }
                 }
-                    dashboardPagingFooter(for: section)
-                }
-                .padding(.trailing, 2)
             }
             .padding(.top, 14)
         }
-        .frame(height: dashboardTileHeight)
         .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
@@ -592,7 +660,7 @@ struct BrowserDashboardPage: View {
             DashSectionHeader(title: "Meetings & events", count: "\(events.count)", systemImage: "calendar.badge.clock")
             ScrollView(.vertical) {
                 VStack(spacing: 10) {
-                    ForEach(events) { event in
+                    ForEach(sortedMeetingEvents(events)) { event in
                         DashInfoRow(
                             systemImage: "calendar",
                             title: event.title ?? event.provider ?? "Event",
@@ -623,7 +691,7 @@ struct BrowserDashboardPage: View {
             DashSectionHeader(title: title, count: "\(rows.count)", systemImage: systemImage)
             ScrollView(.vertical) {
                 VStack(spacing: 10) {
-                    ForEach(rows) { row in
+                    ForEach(sortedClassifications(rows)) { row in
                         DashInfoRow(
                             systemImage: systemImage,
                             title: row.message?.subject ?? dashboardTitle(row.category),
@@ -645,57 +713,82 @@ struct BrowserDashboardPage: View {
     }
 
     private func purchasesCard(_ orders: [BrowserMailOrderSummary], section: BrowserMailDashboardSection) -> some View {
-        DashCard {
-            HStack {
-                Text("Purchases reported")
-                    .font(.system(size: 16, weight: .semibold))
-                Spacer()
-                Text("\(orders.count)")
-                    .font(.system(size: 12, weight: .semibold).monospaced())
-                    .foregroundStyle(DashColor.muted)
-            }
-            ScrollView(.vertical) {
-                VStack(spacing: 9) {
-                    ForEach(orders) { order in
-                        DashPurchaseRow(order: order) {
-                            selectedMessage = order.messages.first ?? order.message
-                        }
-                    }
-                    dashboardPagingFooter(for: section)
+        let groups = purchaseGroups(from: orders)
+
+        return ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 14) {
+                ForEach(groups) { group in
+                    purchasePanel(group)
                 }
-                .padding(.trailing, 2)
+
+                dashboardPagingFooter(for: section)
             }
-            .padding(.top, 14)
+            .padding(.trailing, 2)
         }
         .frame(height: dashboardTileHeight)
         .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
-    private func securityCard(_ alerts: [BrowserMailSecurityNotification], section: BrowserMailDashboardSection) -> some View {
-        DashCard {
-            HStack(spacing: 9) {
-                Circle().fill(Color(red: 0.94, green: 0.27, blue: 0.27)).frame(width: 7, height: 7)
-                Text("Security")
-                    .font(.system(size: 16, weight: .semibold))
-                Spacer()
-                Text("\(alerts.count) alerts")
-                    .font(.system(size: 12, weight: .semibold).monospaced())
-                    .foregroundStyle(DashColor.muted)
-            }
-            ScrollView(.vertical) {
-                VStack(spacing: 10) {
-                    ForEach(alerts) { alert in
-                        DashSecurityRow(alert: alert) {
-                            selectedMessage = alert.message
-                        }
+    private func purchasePanel(_ group: PurchasePanelGroup) -> some View {
+        DashCard(fillsHeight: false) {
+            DashPanelHeader(title: group.title, count: group.orders.count, systemImage: group.systemImage, tint: group.tint)
+
+            VStack(spacing: 9) {
+                ForEach(group.orders) { order in
+                    DashPurchaseRow(order: order) {
+                        selectedMessage = order.messages.first ?? order.message
                     }
-                    dashboardPagingFooter(for: section)
                 }
-                .padding(.trailing, 2)
             }
             .padding(.top, 14)
         }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    private func securityCard(_ alerts: [BrowserMailSecurityNotification], section: BrowserMailDashboardSection) -> some View {
+        let groups = securityAlertGroups(from: alerts)
+
+        return ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 14) {
+                ForEach(groups) { group in
+                    securityEventPanel(group)
+                }
+
+                dashboardPagingFooter(for: section)
+            }
+            .padding(.trailing, 2)
+        }
         .frame(height: dashboardTileHeight)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    private func securityEventPanel(_ group: SecurityAlertGroup) -> some View {
+        DashCard(fillsHeight: false) {
+            HStack(spacing: 9) {
+                Image(systemName: group.systemImage)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(group.tint)
+                    .frame(width: 18)
+
+                Text(group.title)
+                    .font(.system(size: 16, weight: .semibold))
+
+                Spacer()
+
+                Text("\(group.alerts.count)")
+                    .font(.system(size: 12, weight: .semibold).monospaced())
+                    .foregroundStyle(DashColor.muted)
+            }
+
+            VStack(spacing: 10) {
+                ForEach(group.alerts) { alert in
+                    DashSecurityRow(alert: alert) {
+                        selectedMessage = alert.message
+                    }
+                }
+            }
+            .padding(.top, 14)
+        }
         .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
@@ -726,6 +819,407 @@ struct BrowserDashboardPage: View {
         }
         .frame(height: dashboardTileHeight)
         .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    private func shipmentsSortedByDate(_ shipments: [BrowserMailShipmentSummary]) -> [BrowserMailShipmentSummary] {
+        shipments.sorted { shipmentSortTimestamp($0) > shipmentSortTimestamp($1) }
+    }
+
+    private func subscriptionsSortedByDate(_ subscriptions: [BrowserMailSubscriptionSummary]) -> [BrowserMailSubscriptionSummary] {
+        subscriptions.sorted { subscriptionSortTimestamp($0) > subscriptionSortTimestamp($1) }
+    }
+
+    private func sortedOrders(_ orders: [BrowserMailOrderSummary]) -> [BrowserMailOrderSummary] {
+        orders.sorted { orderSortTimestamp($0) > orderSortTimestamp($1) }
+    }
+
+    private func purchaseGroups(from orders: [BrowserMailOrderSummary]) -> [PurchasePanelGroup] {
+        let grouped = Dictionary(grouping: sortedOrders(orders), by: purchaseGroupKey)
+        return grouped.map { key, orders in
+            let info = purchaseGroupInfo(for: key)
+            return PurchasePanelGroup(
+                id: key,
+                title: info.title,
+                systemImage: info.systemImage,
+                tint: info.tint,
+                orders: orders
+            )
+        }
+        .sorted { purchaseGroupTimestamp($0) > purchaseGroupTimestamp($1) }
+    }
+
+    private func purchaseGroupTimestamp(_ group: PurchasePanelGroup) -> Double {
+        group.orders.map(orderSortTimestamp).max() ?? 0
+    }
+
+    private func purchaseGroupKey(_ order: BrowserMailOrderSummary) -> String {
+        let status = normalizedStatusKey(order.status)
+        let signal = purchaseSignalText(order)
+
+        if status.contains("cancel") || status.contains("refund") {
+            return "cancelled"
+        }
+        if status.contains("pickup") ||
+            status.contains("collect") ||
+            signal.contains("pickup") ||
+            signal.contains("pick up") ||
+            signal.contains("takeaway") ||
+            signal.contains("takeout") ||
+            signal.contains("food order") ||
+            signal.contains("restaurant") ||
+            signal.contains("ubereats") ||
+            signal.contains("uber eats") ||
+            signal.contains("doordash") ||
+            signal.contains("door dash") ||
+            signal.contains("deliveroo") ||
+            signal.contains("menulog") {
+            return "pickup_food"
+        }
+        if status.contains("delivered") || status.contains("complete") || status.contains("fulfilled") || status.contains("picked_up") {
+            return "completed"
+        }
+        return "recent"
+    }
+
+    private func purchaseGroupInfo(for key: String) -> (title: String, systemImage: String, tint: Color) {
+        switch key {
+        case "pickup_food":
+            return ("Pickup & food orders", "takeoutbag.and.cup.and.straw", DashColor.amber)
+        case "completed":
+            return ("Completed purchases", "checkmark.circle", Color(red: 0.29, green: 0.86, blue: 0.5))
+        case "cancelled":
+            return ("Cancelled & refunded", "xmark.circle", Color(rgbHex: 0xf87171))
+        default:
+            return ("Recent purchases", "bag", DashColor.tertiary)
+        }
+    }
+
+    private func purchaseSignalText(_ order: BrowserMailOrderSummary) -> String {
+        [
+            order.merchant,
+            order.itemSummary,
+            order.orderNumber,
+            order.status,
+            order.message?.subject,
+            order.message?.snippet,
+            order.messages.first?.subject,
+            order.messages.first?.snippet,
+        ]
+            .compactMap { $0 }
+            .joined(separator: " ")
+            .lowercased()
+    }
+
+    private func sortedSecurityCodes(_ codes: [BrowserMailSecurityCode]) -> [BrowserMailSecurityCode] {
+        codes.sorted { dashboardSortTimestamp(message: $0.message, fallback: $0.updatedAt) > dashboardSortTimestamp(message: $1.message, fallback: $1.updatedAt) }
+    }
+
+    private func sortedSecurityNotifications(_ alerts: [BrowserMailSecurityNotification]) -> [BrowserMailSecurityNotification] {
+        alerts.sorted {
+            dashboardSortTimestamp(message: $0.message, fallback: $0.occurredAt ?? $0.updatedAt) >
+                dashboardSortTimestamp(message: $1.message, fallback: $1.occurredAt ?? $1.updatedAt)
+        }
+    }
+
+    private func securityAlertGroups(from alerts: [BrowserMailSecurityNotification]) -> [SecurityAlertGroup] {
+        let grouped = Dictionary(grouping: sortedSecurityNotifications(alerts), by: securityAlertGroupKey)
+        return grouped.map { key, alerts in
+            let info = securityAlertGroupInfo(for: key)
+            return SecurityAlertGroup(
+                id: key,
+                title: info.title,
+                systemImage: info.systemImage,
+                tint: info.tint,
+                alerts: alerts
+            )
+        }
+        .sorted {
+            securityGroupTimestamp($0) > securityGroupTimestamp($1)
+        }
+    }
+
+    private func securityGroupTimestamp(_ group: SecurityAlertGroup) -> Double {
+        group.alerts
+            .map { dashboardSortTimestamp(message: $0.message, fallback: $0.occurredAt ?? $0.updatedAt) }
+            .max() ?? 0
+    }
+
+    private func securityAlertGroupKey(_ alert: BrowserMailSecurityNotification) -> String {
+        let type = normalizedStatusKey(alert.notificationType)
+        let subject = alert.message?.subject?.lowercased() ?? ""
+        let signal = "\(type) \(subject)"
+
+        if signal.contains("sign_in") ||
+            signal.contains("signin") ||
+            signal.contains("login") ||
+            signal.contains("device") {
+            return "sign_ins"
+        }
+
+        if signal.contains("password") ||
+            signal.contains("recovery") ||
+            signal.contains("reset") {
+            return "passwords"
+        }
+
+        if signal.contains("verify") ||
+            signal.contains("verification") ||
+            signal.contains("signup") ||
+            signal.contains("email") {
+            return "verification"
+        }
+
+        if signal.contains("suspicious") ||
+            signal.contains("warning") ||
+            signal.contains("blocked") ||
+            signal.contains("risk") {
+            return "warnings"
+        }
+
+        return "account_security"
+    }
+
+    private func securityAlertGroupInfo(for key: String) -> (title: String, systemImage: String, tint: Color) {
+        switch key {
+        case "sign_ins":
+            return ("Sign-ins & devices", "person.crop.circle.badge.checkmark", Color(rgbHex: 0x60a5fa))
+        case "passwords":
+            return ("Passwords & recovery", "key.horizontal", DashColor.amber)
+        case "verification":
+            return ("Verification", "checkmark.shield", Color(red: 0.29, green: 0.86, blue: 0.5))
+        case "warnings":
+            return ("Warnings", "exclamationmark.triangle", Color(rgbHex: 0xf87171))
+        default:
+            return ("Account security", "lock.shield", DashColor.tertiary)
+        }
+    }
+
+    private func sortedNotifications(_ notifications: [BrowserMailNotification]) -> [BrowserMailNotification] {
+        notifications.sorted {
+            dashboardSortTimestamp(message: $0.message, fallback: $0.occurredAt ?? $0.updatedAt) >
+                dashboardSortTimestamp(message: $1.message, fallback: $1.occurredAt ?? $1.updatedAt)
+        }
+    }
+
+    private func sortedSupportThreads(_ threads: [BrowserMailSupportThreadSummary]) -> [BrowserMailSupportThreadSummary] {
+        threads.sorted {
+            dashboardSortTimestamp(message: $0.message ?? $0.messages?.first, fallback: $0.updatedAt) >
+                dashboardSortTimestamp(message: $1.message ?? $1.messages?.first, fallback: $1.updatedAt)
+        }
+    }
+
+    private func sortedInvoices(_ invoices: [BrowserMailInvoiceSummary]) -> [BrowserMailInvoiceSummary] {
+        invoices.sorted {
+            dashboardSortTimestamp(message: $0.message ?? $0.messages?.first, fallback: $0.updatedAt) >
+                dashboardSortTimestamp(message: $1.message ?? $1.messages?.first, fallback: $1.updatedAt)
+        }
+    }
+
+    private func invoiceGroups(from invoices: [BrowserMailInvoiceSummary]) -> [InvoicePanelGroup] {
+        let grouped = Dictionary(grouping: sortedInvoices(invoices), by: invoiceGroupKey)
+        return grouped.map { key, invoices in
+            let info = invoiceGroupInfo(for: key)
+            return InvoicePanelGroup(
+                id: key,
+                title: info.title,
+                systemImage: info.systemImage,
+                tint: info.tint,
+                invoices: invoices
+            )
+        }
+        .sorted { invoiceGroupTimestamp($0) > invoiceGroupTimestamp($1) }
+    }
+
+    private func invoiceGroupTimestamp(_ group: InvoicePanelGroup) -> Double {
+        group.invoices
+            .map { dashboardSortTimestamp(message: $0.message ?? $0.messages?.first, fallback: $0.updatedAt) }
+            .max() ?? 0
+    }
+
+    private func invoiceGroupKey(_ invoice: BrowserMailInvoiceSummary) -> String {
+        let status = normalizedStatusKey(invoice.status)
+        if status.contains("overdue") ||
+            status.contains("past_due") ||
+            status.contains("failed") ||
+            status.contains("declined") ||
+            status.contains("unpaid") ||
+            status.contains("due") {
+            return "needs_attention"
+        }
+        if status.contains("paid") || status.contains("confirmed") || status.contains("received") {
+            return "paid"
+        }
+        return "other"
+    }
+
+    private func invoiceGroupInfo(for key: String) -> (title: String, systemImage: String, tint: Color) {
+        switch key {
+        case "needs_attention":
+            return ("Needs attention", "exclamationmark.circle", Color(rgbHex: 0xf87171))
+        case "paid":
+            return ("Paid & confirmed", "checkmark.circle", Color(red: 0.29, green: 0.86, blue: 0.5))
+        default:
+            return ("Invoices & payments", "doc.text", DashColor.tertiary)
+        }
+    }
+
+    private func sortedBookings(_ bookings: [BrowserMailBookingSummary]) -> [BrowserMailBookingSummary] {
+        bookings.sorted {
+            ($0.startTime ?? dashboardSortTimestamp(message: $0.message ?? $0.messages?.first, fallback: $0.updatedAt)) >
+                ($1.startTime ?? dashboardSortTimestamp(message: $1.message ?? $1.messages?.first, fallback: $1.updatedAt))
+        }
+    }
+
+    private func bookingGroups(from bookings: [BrowserMailBookingSummary]) -> [BookingPanelGroup] {
+        let grouped = Dictionary(grouping: sortedBookings(bookings), by: bookingGroupKey)
+        return grouped.map { key, bookings in
+            let info = bookingGroupInfo(for: key)
+            return BookingPanelGroup(
+                id: key,
+                title: info.title,
+                systemImage: info.systemImage,
+                tint: info.tint,
+                bookings: bookings
+            )
+        }
+        .sorted { bookingGroupTimestamp($0) > bookingGroupTimestamp($1) }
+    }
+
+    private func bookingGroupTimestamp(_ group: BookingPanelGroup) -> Double {
+        group.bookings
+            .map { $0.startTime ?? dashboardSortTimestamp(message: $0.message ?? $0.messages?.first, fallback: $0.updatedAt) }
+            .max() ?? 0
+    }
+
+    private func bookingGroupKey(_ booking: BrowserMailBookingSummary) -> String {
+        let signal = bookingSignalText(booking)
+        let category = normalizedStatusKey(booking.category)
+
+        if signal.contains("pickup") ||
+            signal.contains("takeaway") ||
+            signal.contains("takeout") ||
+            signal.contains("ubereats") ||
+            signal.contains("uber eats") ||
+            signal.contains("doordash") ||
+            signal.contains("door dash") ||
+            signal.contains("deliveroo") ||
+            signal.contains("menulog") {
+            return "food_orders"
+        }
+        if category.contains("flight") ||
+            category.contains("hotel") ||
+            category.contains("rental") ||
+            signal.contains("flight") ||
+            signal.contains("hotel") ||
+            signal.contains("itinerary") ||
+            signal.contains("boarding") ||
+            signal.contains("rental") {
+            return "travel"
+        }
+        if category.contains("event") ||
+            signal.contains("ticket") ||
+            signal.contains("concert") ||
+            signal.contains("show") ||
+            signal.contains("festival") ||
+            signal.contains("venue") {
+            return "tickets_events"
+        }
+        if signal.contains("restaurant") ||
+            signal.contains("dining") ||
+            signal.contains("table") ||
+            signal.contains("reservation") ||
+            signal.contains("appointment") {
+            return "reservations"
+        }
+        return "other"
+    }
+
+    private func bookingGroupInfo(for key: String) -> (title: String, systemImage: String, tint: Color) {
+        switch key {
+        case "food_orders":
+            return ("Food orders", "takeoutbag.and.cup.and.straw", DashColor.amber)
+        case "travel":
+            return ("Travel & stays", "airplane.departure", Color(rgbHex: 0x60a5fa))
+        case "tickets_events":
+            return ("Tickets & events", "ticket", Color(rgbHex: 0xc084fc))
+        case "reservations":
+            return ("Reservations & appointments", "calendar.badge.clock", Color(red: 0.29, green: 0.86, blue: 0.5))
+        default:
+            return ("Other bookings", "bookmark", DashColor.tertiary)
+        }
+    }
+
+    private func bookingSignalText(_ booking: BrowserMailBookingSummary) -> String {
+        [
+            booking.category,
+            booking.provider,
+            booking.title,
+            booking.location,
+            booking.status,
+            booking.message?.subject,
+            booking.message?.snippet,
+            booking.messages?.first?.subject,
+            booking.messages?.first?.snippet,
+        ]
+            .compactMap { $0 }
+            .joined(separator: " ")
+            .lowercased()
+    }
+
+    private func sortedMeetingEvents(_ events: [BrowserMailMeetingEventSummary]) -> [BrowserMailMeetingEventSummary] {
+        events.sorted {
+            ($0.startTime ?? dashboardSortTimestamp(message: $0.message ?? $0.messages?.first, fallback: $0.updatedAt)) >
+                ($1.startTime ?? dashboardSortTimestamp(message: $1.message ?? $1.messages?.first, fallback: $1.updatedAt))
+        }
+    }
+
+    private func sortedClassifications(_ rows: [BrowserMailClassificationSummary]) -> [BrowserMailClassificationSummary] {
+        rows.sorted {
+            dashboardSortTimestamp(message: $0.message, fallback: $0.updatedAt) >
+                dashboardSortTimestamp(message: $1.message, fallback: $1.updatedAt)
+        }
+    }
+
+    private func shipmentSortTimestamp(_ shipment: BrowserMailShipmentSummary) -> Double {
+        dashboardSortTimestamp(message: shipment.message ?? shipment.messages?.first, fallback: shipment.updatedAt)
+    }
+
+    private func subscriptionSortTimestamp(_ subscription: BrowserMailSubscriptionSummary) -> Double {
+        dashboardSortTimestamp(message: subscription.message ?? subscription.messages.first, fallback: subscription.updatedAt)
+    }
+
+    private func orderSortTimestamp(_ order: BrowserMailOrderSummary) -> Double {
+        dashboardSortTimestamp(message: order.message ?? order.messages.first, fallback: order.updatedAt)
+    }
+
+    private func dashboardSortTimestamp(message: BrowserMailDashboardMessage?, fallback: Double) -> Double {
+        message?.internalDate ?? fallback
+    }
+
+    private func isArrivingShipment(_ shipment: BrowserMailShipmentSummary) -> Bool {
+        let status = normalizedStatusKey(shipment.status)
+        return status == "out_for_delivery" || status == "out for delivery"
+    }
+
+    private func isDeliveredShipment(_ shipment: BrowserMailShipmentSummary) -> Bool {
+        normalizedStatusKey(shipment.status).contains("delivered")
+    }
+
+    private func isPastSubscription(_ subscription: BrowserMailSubscriptionSummary) -> Bool {
+        let status = normalizedStatusKey(subscription.status)
+        return status.contains("cancel") ||
+            status.contains("expired") ||
+            status.contains("ended") ||
+            status.contains("inactive") ||
+            status.contains("terminated")
+    }
+
+    private func normalizedStatusKey(_ value: String) -> String {
+        value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "-", with: "_")
+            .replacingOccurrences(of: " ", with: "_")
     }
 
     private func date(fromMilliseconds milliseconds: Double?) -> Date? {
@@ -774,10 +1268,43 @@ private extension Color {
     }
 }
 
+private struct SecurityAlertGroup: Identifiable {
+    let id: String
+    let title: String
+    let systemImage: String
+    let tint: Color
+    let alerts: [BrowserMailSecurityNotification]
+}
+
+private struct PurchasePanelGroup: Identifiable {
+    let id: String
+    let title: String
+    let systemImage: String
+    let tint: Color
+    let orders: [BrowserMailOrderSummary]
+}
+
+private struct BookingPanelGroup: Identifiable {
+    let id: String
+    let title: String
+    let systemImage: String
+    let tint: Color
+    let bookings: [BrowserMailBookingSummary]
+}
+
+private struct InvoicePanelGroup: Identifiable {
+    let id: String
+    let title: String
+    let systemImage: String
+    let tint: Color
+    let invoices: [BrowserMailInvoiceSummary]
+}
+
 // MARK: - DashCard
 
 private struct DashCard<Content: View>: View {
     var dashed: Bool = false
+    var fillsHeight: Bool = true
     @ViewBuilder var content: Content
 
     var body: some View {
@@ -785,7 +1312,7 @@ private struct DashCard<Content: View>: View {
             content
         }
         .padding(20)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, maxHeight: fillsHeight ? .infinity : nil, alignment: .topLeading)
         .background(dashed ? DashColor.sunken : DashColor.card,
                     in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         .overlay {
@@ -865,12 +1392,58 @@ private struct DashSectionHeader: View {
     }
 }
 
+private struct DashPanelHeader: View {
+    let title: String
+    let count: Int
+    let systemImage: String
+    let tint: Color
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Image(systemName: systemImage)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(tint)
+                .frame(width: 18)
+
+            Text(title)
+                .font(.system(size: 16, weight: .semibold))
+
+            Spacer()
+
+            Text("\(count)")
+                .font(.system(size: 12, weight: .semibold).monospaced())
+                .foregroundStyle(DashColor.muted)
+        }
+    }
+}
+
+private struct DashSubsectionHeader: View {
+    let title: String
+    let count: Int
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(DashColor.secondary)
+
+            Text("\(count)")
+                .font(.system(size: 10.5, weight: .semibold).monospaced())
+                .foregroundStyle(DashColor.muted)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 2)
+                .background(Color.white.opacity(0.06), in: Capsule())
+        }
+    }
+}
+
 // MARK: - Paging Footer
 
 private struct DashPagingFooter: View {
     let hasMore: Bool
     let isLoading: Bool
     let onLoadMore: () -> Void
+    @State private var didTriggerForAppearance = false
 
     var body: some View {
         Group {
@@ -892,18 +1465,26 @@ private struct DashPagingFooter: View {
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 8)
                 .contentShape(Rectangle())
-                .onAppear(perform: triggerIfNeeded)
-                .onChange(of: isLoading) { _, _ in triggerIfNeeded() }
+                .onTapGesture(perform: loadMoreIfPossible)
+                .onAppear(perform: triggerOnceForAppearance)
+                .onDisappear {
+                    didTriggerForAppearance = false
+                }
             } else {
                 Color.clear.frame(height: 1)
             }
         }
     }
 
-    private func triggerIfNeeded() {
-        if hasMore, !isLoading {
-            onLoadMore()
-        }
+    private func triggerOnceForAppearance() {
+        guard hasMore, !isLoading, !didTriggerForAppearance else { return }
+        didTriggerForAppearance = true
+        loadMoreIfPossible()
+    }
+
+    private func loadMoreIfPossible() {
+        guard hasMore, !isLoading else { return }
+        onLoadMore()
     }
 }
 
@@ -1016,16 +1597,47 @@ private struct DashSubscriptionRow: View {
     let onSelect: () -> Void
     @State private var hovered = false
 
+    private var statusKey: String {
+        sub.status
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "-", with: "_")
+            .replacingOccurrences(of: " ", with: "_")
+    }
+
+    private var isPast: Bool {
+        statusKey.contains("cancel") ||
+            statusKey.contains("expired") ||
+            statusKey.contains("ended") ||
+            statusKey.contains("inactive") ||
+            statusKey.contains("terminated")
+    }
+
     private var daysLeft: Int? {
         guard let ms = sub.nextPaymentDueAt else { return nil }
         return Calendar.current.dateComponents([.day], from: .now, to: Date(timeIntervalSince1970: ms / 1000)).day
     }
 
     private var tagInfo: (label: String, bg: Color, fg: Color) {
+        if isPast {
+            return (statusLabel, Color.white.opacity(0.08), DashColor.tertiary)
+        }
+
+        if statusKey.contains("fail") || statusKey.contains("past_due") || statusKey.contains("declin") {
+            return ("Payment issue", overdueColors.bg, overdueColors.fg)
+        }
+
+        if statusKey.contains("pause") {
+            return ("Paused", Color.white.opacity(0.08), DashColor.tertiary)
+        }
+
+        if statusKey.contains("trial") {
+            return ("Trial", Color.white.opacity(0.08), DashColor.tertiary)
+        }
+
         switch daysLeft {
-        case let d? where d < 0:  return ("Overdue",    overdueColors.bg,  overdueColors.fg)
-        case let d? where d <= 3: return ("Due soon",   overdueColors.bg,  overdueColors.fg)
-        case let d? where d <= 7: return ("Due in \(d)d", DashColor.amber.opacity(0.15), DashColor.amber)
+        case let d? where d >= 0 && d <= 3: return ("Due soon",   overdueColors.bg,  overdueColors.fg)
+        case let d? where d >= 0 && d <= 7: return ("Due in \(d)d", DashColor.amber.opacity(0.15), DashColor.amber)
         default:                  return ("Active",     Color.white.opacity(0.08), DashColor.tertiary)
         }
     }
@@ -1038,6 +1650,21 @@ private struct DashSubscriptionRow: View {
     private var priceText: String {
         guard let amount = sub.amount else { return "" }
         return "\(sub.currency ?? "") \(amount.formatted(.number.precision(.fractionLength(2))))".trimmingCharacters(in: .whitespaces)
+    }
+
+    private var statusLabel: String {
+        sub.status.replacingOccurrences(of: "_", with: " ")
+            .split(separator: " ")
+            .map { $0.capitalized }
+            .joined(separator: " ")
+    }
+
+    private var showsBillingDate: Bool {
+        guard !renewText.isEmpty else { return false }
+        if isPast || statusKey.contains("fail") || statusKey.contains("past_due") || statusKey.contains("declin") {
+            return true
+        }
+        return (daysLeft ?? 0) >= 0
     }
 
     private var renewText: String {
@@ -1065,8 +1692,8 @@ private struct DashSubscriptionRow: View {
                         .foregroundStyle(tagInfo.fg)
                         .padding(.horizontal, 9).padding(.vertical, 3)
                         .background(tagInfo.bg, in: Capsule())
-                    if !renewText.isEmpty {
-                        let suffix = daysLeft.map { " · \($0)d" } ?? ""
+                    if showsBillingDate {
+                        let suffix = daysLeft.flatMap { $0 >= 0 ? " · \($0)d" : nil } ?? ""
                         Text(renewText + suffix)
                             .font(.system(size: 11.5))
                             .foregroundStyle(DashColor.tertiary)
@@ -1161,6 +1788,13 @@ private struct DashSecurityRow: View {
     let onSelect: () -> Void
     @State private var hovered = false
 
+    private var displayDate: Date? {
+        if let date = alert.message?.displayDate {
+            return date
+        }
+        return Date(timeIntervalSince1970: (alert.occurredAt ?? alert.updatedAt) / 1000)
+    }
+
     var body: some View {
         Button(action: onSelect) {
             HStack(spacing: 10) {
@@ -1175,7 +1809,7 @@ private struct DashSecurityRow: View {
                         .lineLimit(1)
                 }
                 Spacer(minLength: 8)
-                if let date = alert.message?.displayDate {
+                if let date = displayDate {
                     Text(date.formatted(date: .abbreviated, time: .omitted))
                         .font(.system(size: 11.5))
                         .foregroundStyle(DashColor.tertiary)

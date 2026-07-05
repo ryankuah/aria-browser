@@ -301,10 +301,12 @@ export const analyzeRecentMessages = mutation({
       .order("desc")
       .take(normalizeClientNumber(args.limit) ?? 250);
 
-    for (const message of messages) {
-      await ctx.scheduler.runAfter(0, internal.mailAnalysis.analyzeGmailMessage, {
+    let scheduled = 0;
+    for (const message of [...messages].reverse()) {
+      await ctx.scheduler.runAfter(scheduled * ANALYSIS_BACKFILL_MIN_SPACING_MS, internal.mailAnalysis.analyzeGmailMessage, {
         gmailMessageId: message._id,
       });
+      scheduled += 1;
     }
 
     return { scheduled: messages.length };
@@ -323,10 +325,12 @@ export const analyzeNewestMessagesByEmailDateForDev = mutation({
       .order("desc")
       .take(limit);
 
-    for (const message of messages) {
-      await ctx.scheduler.runAfter(0, internal.mailAnalysis.analyzeGmailMessage, {
+    let scheduled = 0;
+    for (const message of [...messages].reverse()) {
+      await ctx.scheduler.runAfter(scheduled * ANALYSIS_BACKFILL_MIN_SPACING_MS, internal.mailAnalysis.analyzeGmailMessage, {
         gmailMessageId: message._id,
       });
+      scheduled += 1;
     }
 
     return {
@@ -372,7 +376,7 @@ export const scheduleMailAnalysisBackfill = mutation({
     const page = await ctx.db
       .query("gmailMessages")
       .withIndex("by_internal_date")
-      .order("desc")
+      .order("asc")
       .paginate({
         numItems: Math.min(batchSize, remaining),
         cursor: args.cursor ?? null,

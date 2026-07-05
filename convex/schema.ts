@@ -208,6 +208,23 @@ export default defineSchema({
     .index("by_user_category", ["userId", "category"])
     .index("by_user_updated", ["userId", "updatedAt"]),
 
+  mailAnalysisQueue: defineTable({
+    userId: v.id("users"),
+    gmailMessageId: v.id("gmailMessages"),
+    internalDate: v.number(),
+    status: v.string(),
+    model: v.optional(v.string()),
+    source: v.optional(v.string()),
+    analysis: v.optional(v.any()),
+    attempts: v.number(),
+    lastError: v.optional(v.string()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_message", ["gmailMessageId"])
+    .index("by_user_status_internal_date", ["userId", "status", "internalDate"])
+    .index("by_user_internal_date", ["userId", "internalDate"]),
+
   mailSecurityCodes: defineTable({
     userId: v.id("users"),
     gmailMessageId: v.id("gmailMessages"),
@@ -548,6 +565,13 @@ export default defineSchema({
     googleAccountId: v.id("googleAccounts"),
     historyId: v.optional(v.string()),
     watchExpiration: v.optional(v.number()),
+    lastNotificationHistoryId: v.optional(v.string()),
+    lastPubSubMessageId: v.optional(v.string()),
+    lastPubSubPublishedAt: v.optional(v.number()),
+    lastGmailSyncStartedAt: v.optional(v.number()),
+    lastGmailSyncCompletedAt: v.optional(v.number()),
+    lastGmailSyncError: v.optional(v.string()),
+    gmailSyncStatus: v.optional(v.string()),
     backfillStatus: v.optional(v.string()),
     backfillQuery: v.optional(v.string()),
     backfillPageToken: v.optional(v.string()),
@@ -561,7 +585,9 @@ export default defineSchema({
     backfillCompletedAt: v.optional(v.number()),
     backfillLastError: v.optional(v.string()),
     updatedAt: v.number(),
-  }).index("by_account", ["googleAccountId"]),
+  })
+    .index("by_account", ["googleAccountId"])
+    .index("by_watch_expiration", ["watchExpiration"]),
 
   calendarSyncState: defineTable({
     googleAccountId: v.id("googleAccounts"),
