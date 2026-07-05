@@ -77,8 +77,10 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable, WKNavigationDe
         webView.navigationDelegate = self
         webView.underPageBackgroundColor = .clear
         webView.pageZoom = pageZoom
-        fullscreenObservation = webView.observe(\.fullscreenState, options: [.new]) { [weak self] _, _ in
+        fullscreenObservation = webView.observe(\.fullscreenState, options: [.new]) { [weak self] webView, change in
             Task { @MainActor in
+                webView.updateElementFullscreenPresentation(for: change.newValue ?? webView.fullscreenState)
+
                 guard let self else {
                     return
                 }
