@@ -226,37 +226,8 @@ struct BrowserBookmark: Identifiable, Equatable {
     }
 }
 
-struct BrowserProfile: Identifiable, Equatable, Sendable {
-    let id: UUID
-    var name: String
-    var colorHex: String
-    var position: Int
-
-    static let defaultColorHex = "#2F80ED"
-    static let lightPresetColorHexes = [
-        "#F8FAFC",
-        "#FDE68A",
-        "#BFDBFE",
-        "#BBF7D0",
-        "#FBCFE8",
-        "#FED7AA",
-        "#DDD6FE",
-        "#CCFBF1"
-    ]
-    static let darkPresetColorHexes = [
-        "#111827",
-        "#2F80ED",
-        "#047857",
-        "#B91C1C",
-        "#6D28D9",
-        "#0F766E",
-        "#A16207",
-        "#BE185D"
-    ]
-
-    var displayName: String {
-        browserDisplayTitle(name, fallback: "Profile")
-    }
+enum BrowserAppearance {
+    static let accentColorHex = "#2F80ED"
 }
 
 struct BrowserHistoryEntry: Identifiable, Equatable {

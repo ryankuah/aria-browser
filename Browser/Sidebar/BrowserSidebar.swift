@@ -3,7 +3,6 @@ import SwiftUI
 
 struct BrowserSidebar: View {
     @ObservedObject var browser: BrowserState
-    @ObservedObject var updateController: BrowserUpdateController
     @Binding var isSettingsPresented: Bool
     let window: NSWindow?
     let cornerRadius: CGFloat
@@ -29,7 +28,6 @@ struct BrowserSidebar: View {
 
             DownloadsFooter(
                 browser: browser,
-                updateController: updateController,
                 isPresented: $isDownloadsPresented,
                 isSettingsPresented: $isSettingsPresented,
                 onOpenFullSettings: onOpenFullSettings,

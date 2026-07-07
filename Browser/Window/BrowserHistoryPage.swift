@@ -178,7 +178,7 @@ struct BrowserHistoryPage: View {
             )
         } else {
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 5) {
+                LazyVStack(alignment: .leading, spacing: 4) {
                     ForEach(filteredLogVisits) { visit in
                         BrowserHistoryLogRow(
                             visit: visit,
@@ -196,10 +196,10 @@ struct BrowserHistoryPage: View {
                         )
                     }
                 }
-                .frame(maxWidth: 920)
-                .padding(.horizontal, 24)
-                .padding(.vertical, 18)
-                .frame(maxWidth: .infinity)
+                .frame(maxWidth: 1120, alignment: .leading)
+                .padding(.horizontal, 28)
+                .padding(.vertical, 20)
+                .frame(maxWidth: .infinity, alignment: .center)
             }
             .scrollIndicators(.visible)
         }

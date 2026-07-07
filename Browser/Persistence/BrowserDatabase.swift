@@ -3,6 +3,7 @@ import SQLite3
 
 final class BrowserDatabase {
     private static let defaultSessionID = "default"
+    private static let localProfileName = "Browser"
 
     private let db: OpaquePointer?
 
@@ -43,7 +44,7 @@ final class BrowserDatabase {
         _ = sqlite3_close(db)
     }
 
-    func loadProfiles() throws -> [StoredBrowserProfile] {
+    private func loadProfiles() throws -> [StoredBrowserProfile] {
         try withStatement(
             """
             SELECT id, name, color_hex, position
@@ -62,7 +63,7 @@ final class BrowserDatabase {
                     StoredBrowserProfile(
                         id: id,
                         name: statement.text(at: 1) ?? "Profile",
-                        colorHex: statement.text(at: 2) ?? BrowserProfile.defaultColorHex,
+                        colorHex: statement.text(at: 2) ?? BrowserAppearance.accentColorHex,
                         position: Int(statement.int64(at: 3))
                     )
                 )
@@ -72,7 +73,30 @@ final class BrowserDatabase {
         }
     }
 
-    func saveProfile(_ profile: StoredBrowserProfile) throws {
+    func ensureLocalProfile() throws -> UUID {
+        let profiles = try loadProfiles()
+        if let activeProfileID = try loadActiveProfileID(),
+           profiles.contains(where: { $0.id == activeProfileID }) {
+            return activeProfileID
+        }
+
+        if let firstProfile = profiles.sorted(by: { $0.position < $1.position }).first {
+            try saveSetting(key: "activeProfileID", value: firstProfile.id.uuidString)
+            return firstProfile.id
+        }
+
+        let profileID = UUID()
+        try saveProfile(StoredBrowserProfile(
+            id: profileID,
+            name: Self.localProfileName,
+            colorHex: BrowserAppearance.accentColorHex,
+            position: 0
+        ))
+        try saveSetting(key: "activeProfileID", value: profileID.uuidString)
+        return profileID
+    }
+
+    private func saveProfile(_ profile: StoredBrowserProfile) throws {
         try withStatement(
             """
             INSERT INTO profiles (id, name, color_hex, position, created_at, updated_at)
@@ -95,34 +119,7 @@ final class BrowserDatabase {
         }
     }
 
-    func deleteProfileAndReindex(id: UUID, activeProfileID: UUID?, remainingProfiles: [StoredBrowserProfile]) throws {
-        try transaction {
-            try withStatement("DELETE FROM profiles WHERE id = ?") { statement in
-                try statement.bind(id.uuidString, at: 1)
-                try statement.stepDone()
-            }
-
-            try withStatement("DELETE FROM sessions WHERE id = ?") { statement in
-                try statement.bind(id.uuidString, at: 1)
-                try statement.stepDone()
-            }
-
-            for profile in remainingProfiles {
-                try saveProfile(profile)
-            }
-
-            if let activeProfileID {
-                try saveSetting(key: "activeProfileID", value: activeProfileID.uuidString)
-            } else {
-                try withStatement("DELETE FROM settings WHERE key = ?") { statement in
-                    try statement.bind("activeProfileID", at: 1)
-                    try statement.stepDone()
-                }
-            }
-        }
-    }
-
-    func loadActiveProfileID() throws -> UUID? {
+    private func loadActiveProfileID() throws -> UUID? {
         let settings = try loadSettings()
         guard let rawID = settings["activeProfileID"] else {
             return nil
@@ -1029,7 +1026,7 @@ final class BrowserDatabase {
                     ) { statement in
                         try statement.bind(importedProfileID.uuidString, at: 1)
                         try statement.bind("Personal", at: 2)
-                        try statement.bind(BrowserProfile.defaultColorHex, at: 3)
+                        try statement.bind(BrowserAppearance.accentColorHex, at: 3)
                         try statement.bind(Int64(0), at: 4)
                         try statement.bind(now, at: 5)
                         try statement.bind(now, at: 6)

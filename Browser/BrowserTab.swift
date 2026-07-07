@@ -337,12 +337,6 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable, WKNavigationDe
             return
         }
 
-        if BrowserNavigation.isBrowserCallbackURL(url) {
-            BrowserExternalURLRouter.shared.openExternalURL(url)
-            decisionHandler(.cancel)
-            return
-        }
-
         guard BrowserNavigation.isAllowedNavigationURL(url) else {
             decisionHandler(.cancel)
             return
@@ -600,13 +594,6 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable, WKNavigationDe
     }
 
     private func handleNavigationFailure(_ error: Error) {
-        if let callbackURL = Self.browserCallbackURL(from: error) {
-            BrowserExternalURLRouter.shared.openExternalURL(callbackURL)
-            pendingNavigationURL = nil
-            pageFailure = nil
-            return
-        }
-
         guard !Self.shouldIgnoreNavigationFailure(error) else {
             return
         }
@@ -633,23 +620,7 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable, WKNavigationDe
             return true
         }
 
-        if browserCallbackURL(from: error) != nil {
-            return true
-        }
-
         return false
-    }
-
-    private static func browserCallbackURL(from error: Error) -> URL? {
-        let nsError = error as NSError
-        let candidate = (nsError.userInfo[NSURLErrorFailingURLErrorKey] as? URL)
-            ?? (nsError.userInfo[NSURLErrorFailingURLStringErrorKey] as? String).flatMap(URL.init(string:))
-
-        guard let candidate, BrowserNavigation.isBrowserCallbackURL(candidate) else {
-            return nil
-        }
-
-        return candidate
     }
 
     private static func shouldShowFailure(forHTTPStatusCode statusCode: Int) -> Bool {

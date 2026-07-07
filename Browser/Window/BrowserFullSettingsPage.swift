@@ -5,11 +5,12 @@ struct BrowserFullSettingsPage: View {
     @ObservedObject var browser: BrowserState
     let onClose: () -> Void
 
-    @State private var isAddingProfile = false
-    @State private var editingProfileID: BrowserProfile.ID?
     @State private var isAddingUserScript = false
     @State private var editingUserScriptID: BrowserUserScript.ID?
     @State private var userScriptDraft = FullSettingsUserScriptDraft()
+
+    private let contentMaxWidth: CGFloat = 1120
+    private let twoColumnThreshold: CGFloat = 860
 
     var body: some View {
         ZStack {
@@ -30,193 +31,169 @@ struct BrowserFullSettingsPage: View {
                 Divider()
                     .opacity(0.45)
 
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 14) {
-                        FullSettingsSection(title: "General", systemName: "magnifyingglass") {
-                            VStack(alignment: .leading, spacing: 10) {
-                                FullSettingsLabel("Search Engine")
+                GeometryReader { proxy in
+                    let usesTwoColumns = proxy.size.width - 56 >= twoColumnThreshold
 
-                                FullSettingsSegmentedControl {
-                                    ForEach(BrowserSearchEngine.allCases, id: \.rawValue) { engine in
-                                        FullSettingsSegmentButton(
-                                            title: engine.label,
-                                            isSelected: browser.searchEngine == engine
-                                        ) {
-                                            browser.setSearchEngine(engine)
-                                        }
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 20) {
+                            if usesTwoColumns {
+                                HStack(alignment: .top, spacing: 20) {
+                                    VStack(spacing: 20) {
+                                        generalCard
                                     }
+                                    .frame(maxWidth: .infinity, alignment: .top)
+
+                                    VStack(spacing: 20) {
+                                        appearanceCard
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .top)
                                 }
+                            } else {
+                                generalCard
+                                appearanceCard
                             }
 
-                            FullSettingsDivider()
-
-                            FullSettingsValueRow(
-                                title: "Downloads",
-                                value: browser.downloadsDirectoryDisplayPath,
-                                systemName: "folder"
-                            )
-
-                            HStack(spacing: 8) {
-                                FullSettingsActionButton(title: "Open Folder", systemName: "arrow.up.forward.app") {
-                                    browser.openDownloadsFolder()
-                                }
-
-                                FullSettingsActionButton(title: "Copy Path", systemName: "doc.on.doc") {
-                                    browser.copyDownloadsDirectoryPath()
-                                }
-
-                                Spacer()
-                            }
+                            userScriptsCard
                         }
-
-                        FullSettingsSection(title: "Appearance", systemName: "paintpalette") {
-                            FullSettingsLabel("Bezel Style")
-
-                            FullSettingsSegmentedControl {
-                                ForEach(BrowserBezelStyle.allCases, id: \.rawValue) { style in
-                                    FullSettingsSegmentButton(
-                                        title: style.label,
-                                        isSelected: browser.bezelStyle == style
-                                    ) {
-                                        browser.setBezelStyle(style)
-                                    }
-                                }
-                            }
-                        }
-
-                        FullSettingsSection(title: "User Scripts", systemName: "curlybraces") {
-                            VStack(alignment: .leading, spacing: 8) {
-                                if browser.userScripts.isEmpty && !isAddingUserScript {
-                                    Text("No scripts")
-                                        .font(.system(size: 12, weight: .medium))
-                                        .foregroundStyle(.secondary)
-                                }
-
-                                ForEach(browser.userScripts) { script in
-                                    FullSettingsUserScriptRow(
-                                        script: script,
-                                        isEditing: editingUserScriptID == script.id,
-                                        onEnabledChange: { isEnabled in
-                                            browser.setUserScriptEnabled(id: script.id, isEnabled: isEnabled)
-                                        },
-                                        onEdit: {
-                                            startEditingUserScript(script)
-                                        },
-                                        onDelete: {
-                                            deleteUserScript(script)
-                                        }
-                                    )
-                                }
-                            }
-
-                            if isAddingUserScript || editingUserScript != nil {
-                                FullSettingsUserScriptEditor(
-                                    title: isAddingUserScript ? "New Script" : "Edit Script",
-                                    draft: $userScriptDraft,
-                                    onSave: saveUserScriptDraft,
-                                    onCancel: cancelUserScriptEditor
-                                )
-                                .transition(.move(edge: .top).combined(with: .opacity))
-                            }
-
-                            HStack {
-                                FullSettingsActionButton(
-                                    title: isAddingUserScript ? "Cancel" : "Add Script",
-                                    systemName: isAddingUserScript ? "xmark" : "plus"
-                                ) {
-                                    if isAddingUserScript {
-                                        cancelUserScriptEditor()
-                                    } else {
-                                        startAddingUserScript()
-                                    }
-                                }
-
-                                Spacer()
-                            }
-                        }
-
-                        FullSettingsSection(title: "Profiles", systemName: "person.crop.circle") {
-                            VStack(alignment: .leading, spacing: 8) {
-                                ForEach(browser.profiles) { profile in
-                                    FullSettingsProfileRow(
-                                        profile: profile,
-                                        isSelected: browser.selectedProfileID == profile.id,
-                                        canDelete: browser.profiles.count > 1,
-                                        onSelect: {
-                                            browser.switchProfile(id: profile.id)
-                                        },
-                                        onEdit: {
-                                            withAnimation(.easeInOut(duration: 0.14)) {
-                                                isAddingProfile = false
-                                                editingProfileID = profile.id
-                                            }
-                                        },
-                                        onDelete: {
-                                            withAnimation(.easeInOut(duration: 0.14)) {
-                                                if editingProfileID == profile.id {
-                                                    editingProfileID = nil
-                                                }
-                                                browser.deleteProfile(id: profile.id)
-                                            }
-                                        }
-                                    )
-                                }
-                            }
-
-                            if isAddingProfile {
-                                ProfileCreationPanel(
-                                    title: "New Profile",
-                                    defaultName: "",
-                                    defaultColor: NSColor(hexString: BrowserProfile.defaultColorHex) ?? .systemBlue,
-                                    profileColor: browser.profileNSColor
-                                ) { name, colorHex in
-                                    browser.createProfile(name: name, colorHex: colorHex)
-                                    withAnimation(.easeInOut(duration: 0.14)) {
-                                        isAddingProfile = false
-                                    }
-                                }
-                            }
-
-                            if let editingProfile {
-                                ProfileCreationPanel(
-                                    title: "Edit Profile",
-                                    defaultName: editingProfile.displayName,
-                                    defaultColor: NSColor(hexString: editingProfile.colorHex) ?? .systemBlue,
-                                    submitTitle: "Save",
-                                    profileColor: browser.profileNSColor
-                                ) { name, colorHex in
-                                    browser.updateProfile(id: editingProfile.id, name: name, colorHex: colorHex)
-                                    withAnimation(.easeInOut(duration: 0.14)) {
-                                        editingProfileID = nil
-                                    }
-                                }
-                            }
-
-                            HStack {
-                                FullSettingsActionButton(
-                                    title: isAddingProfile ? "Cancel" : "Add Profile",
-                                    systemName: isAddingProfile ? "xmark" : "plus"
-                                ) {
-                                    withAnimation(.easeInOut(duration: 0.14)) {
-                                        editingProfileID = nil
-                                        isAddingProfile.toggle()
-                                    }
-                                }
-
-                                Spacer()
-                            }
-                        }
-
+                        .frame(maxWidth: contentMaxWidth, alignment: .leading)
+                        .padding(28)
+                        .frame(maxWidth: .infinity, alignment: .center)
                     }
-                    .frame(maxWidth: 920, alignment: .leading)
-                    .padding(18)
-                    .frame(maxWidth: .infinity, alignment: .top)
+                    .scrollIndicators(.visible)
                 }
-                .scrollIndicators(.visible)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .onExitCommand(perform: onClose)
+    }
+
+    // MARK: - Cards
+
+    private var generalCard: some View {
+        SettingsCard(title: "General", systemName: "magnifyingglass") {
+            SettingsField(label: "Search Engine") {
+                SettingsSegmentedControl {
+                    ForEach(BrowserSearchEngine.allCases, id: \.rawValue) { engine in
+                        SettingsSegmentButton(
+                            title: engine.label,
+                            isSelected: browser.searchEngine == engine
+                        ) {
+                            browser.setSearchEngine(engine)
+                        }
+                    }
+                }
+            }
+
+            SettingsRowDivider()
+
+            SettingsField(label: "Downloads") {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "folder")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 16)
+
+                        Text(browser.downloadsDirectoryDisplayPath)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .padding(.horizontal, 10)
+                    .frame(height: 32)
+                    .background {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color.primary.opacity(0.05))
+                    }
+
+                    HStack(spacing: 8) {
+                        SettingsActionButton(title: "Open Folder", systemName: "arrow.up.forward.app") {
+                            browser.openDownloadsFolder()
+                        }
+
+                        SettingsActionButton(title: "Copy Path", systemName: "doc.on.doc") {
+                            browser.copyDownloadsDirectoryPath()
+                        }
+
+                        Spacer(minLength: 0)
+                    }
+                }
+            }
+        }
+    }
+
+    private var appearanceCard: some View {
+        SettingsCard(title: "Appearance", systemName: "paintpalette") {
+            SettingsField(label: "Bezel Style") {
+                SettingsSegmentedControl {
+                    ForEach(BrowserBezelStyle.allCases, id: \.rawValue) { style in
+                        SettingsSegmentButton(
+                            title: style.label,
+                            isSelected: browser.bezelStyle == style
+                        ) {
+                            browser.setBezelStyle(style)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var userScriptsCard: some View {
+        SettingsCard(title: "User Scripts", systemName: "curlybraces") {
+            VStack(alignment: .leading, spacing: 10) {
+                if browser.userScripts.isEmpty && !isAddingUserScript {
+                    SettingsEmptyRow(
+                        systemName: "curlybraces",
+                        message: "No user scripts yet. Add one to run custom JavaScript on pages you visit."
+                    )
+                }
+
+                ForEach(browser.userScripts) { script in
+                    FullSettingsUserScriptRow(
+                        script: script,
+                        isEditing: editingUserScriptID == script.id,
+                        onEnabledChange: { isEnabled in
+                            browser.setUserScriptEnabled(id: script.id, isEnabled: isEnabled)
+                        },
+                        onEdit: {
+                            startEditingUserScript(script)
+                        },
+                        onDelete: {
+                            deleteUserScript(script)
+                        }
+                    )
+                }
+
+                if isAddingUserScript || editingUserScript != nil {
+                    FullSettingsUserScriptEditor(
+                        title: isAddingUserScript ? "New Script" : "Edit Script",
+                        draft: $userScriptDraft,
+                        onSave: saveUserScriptDraft,
+                        onCancel: cancelUserScriptEditor
+                    )
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                }
+
+                HStack {
+                    SettingsActionButton(
+                        title: isAddingUserScript ? "Cancel" : "Add Script",
+                        systemName: isAddingUserScript ? "xmark" : "plus"
+                    ) {
+                        if isAddingUserScript {
+                            cancelUserScriptEditor()
+                        } else {
+                            startAddingUserScript()
+                        }
+                    }
+
+                    Spacer(minLength: 0)
+                }
+                .padding(.top, 2)
+            }
+        }
     }
 
     private var header: some View {
@@ -245,14 +222,6 @@ struct BrowserFullSettingsPage: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
-    }
-
-    private var editingProfile: BrowserProfile? {
-        guard let editingProfileID else {
-            return nil
-        }
-
-        return browser.profiles.first { $0.id == editingProfileID }
     }
 
     private var editingUserScript: BrowserUserScript? {
@@ -328,7 +297,9 @@ struct BrowserFullSettingsPage: View {
     }
 }
 
-private struct FullSettingsSection<Content: View>: View {
+// MARK: - Layout primitives
+
+private struct SettingsCard<Content: View>: View {
     let title: String
     let systemName: String
     let content: Content
@@ -340,15 +311,48 @@ private struct FullSettingsSection<Content: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 9) {
                 Image(systemName: systemName)
                     .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.secondary)
                     .frame(width: 18)
 
                 Text(title)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: 14, weight: .semibold))
             }
+
+            content
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(18)
+        .background {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color.primary.opacity(0.05))
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.07), lineWidth: 1)
+        }
+    }
+}
+
+private struct SettingsField<Content: View>: View {
+    let label: String
+    let content: Content
+
+    init(label: String, @ViewBuilder content: () -> Content) {
+        self.label = label
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(label)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .textCase(.uppercase)
+                .kerning(0.4)
 
             content
         }
@@ -356,54 +360,39 @@ private struct FullSettingsSection<Content: View>: View {
     }
 }
 
-private struct FullSettingsLabel: View {
-    let title: String
-
-    init(_ title: String) {
-        self.title = title
-    }
-
-    var body: some View {
-        Text(title)
-            .font(.system(size: 11, weight: .medium))
-            .foregroundStyle(.secondary)
-    }
-}
-
-private struct FullSettingsDivider: View {
+private struct SettingsRowDivider: View {
     var body: some View {
         Divider()
-            .opacity(0.38)
+            .opacity(0.32)
     }
 }
 
-private struct FullSettingsValueRow: View {
-    let title: String
-    let value: String
+private struct SettingsEmptyRow: View {
     let systemName: String
+    let message: String
 
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: systemName)
-                .font(.system(size: 12, weight: .semibold))
-                .frame(width: 18)
-                .foregroundStyle(.secondary)
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(.tertiary)
 
-            Text(title)
+            Text(message)
                 .font(.system(size: 12, weight: .medium))
-
-            Spacer()
-
-            Text(value)
-                .font(.system(size: 12))
                 .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background {
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(Color.primary.opacity(0.03))
         }
     }
 }
 
-private struct FullSettingsSegmentedControl<Content: View>: View {
+private struct SettingsSegmentedControl<Content: View>: View {
     let content: Content
 
     init(@ViewBuilder content: () -> Content) {
@@ -411,13 +400,23 @@ private struct FullSettingsSegmentedControl<Content: View>: View {
     }
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 3) {
             content
         }
+        .padding(3)
+        .background {
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(Color.primary.opacity(0.06))
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.05), lineWidth: 1)
+        }
+        .fixedSize(horizontal: true, vertical: false)
     }
 }
 
-private struct FullSettingsSegmentButton: View {
+private struct SettingsSegmentButton: View {
     let title: String
     let isSelected: Bool
     let action: () -> Void
@@ -429,25 +428,25 @@ private struct FullSettingsSegmentButton: View {
             Text(title)
                 .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
                 .lineLimit(1)
-                .minimumScaleFactor(0.82)
-                .frame(maxWidth: .infinity)
-                .frame(height: 30)
+                .padding(.horizontal, 16)
+                .frame(height: 28)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .foregroundStyle(isSelected ? .primary : .secondary)
         .background {
             RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(isSelected ? Color.primary.opacity(0.13) : isHovered ? Color.primary.opacity(0.07) : Color.clear)
+                .fill(isSelected ? Color.primary.opacity(0.14) : isHovered ? Color.primary.opacity(0.06) : Color.clear)
         }
         .onHover { isHovered = $0 }
         .cursor(.pointingHand)
         .accessibilityLabel(title)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
         .help(title)
     }
 }
 
-private struct FullSettingsActionButton: View {
+private struct SettingsActionButton: View {
     let title: String
     let systemName: String
     let action: () -> Void
@@ -464,19 +463,35 @@ private struct FullSettingsActionButton: View {
                     .font(.system(size: 12, weight: .semibold))
             }
             .frame(height: 30)
-            .padding(.horizontal, 10)
+            .padding(.horizontal, 12)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .contentShape(Rectangle())
         .background {
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(isHovered ? Color.primary.opacity(0.13) : Color.primary.opacity(0.09))
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(isHovered ? Color.primary.opacity(0.13) : Color.primary.opacity(0.08))
         }
         .onHover { isHovered = $0 }
         .cursor(.pointingHand)
         .accessibilityLabel(title)
         .help(title)
+    }
+}
+
+private struct FullSettingsLabel: View {
+    let title: String
+
+    init(_ title: String) {
+        self.title = title
+    }
+
+    var body: some View {
+        Text(title)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .textCase(.uppercase)
+            .kerning(0.4)
     }
 }
 
@@ -514,14 +529,14 @@ private struct FullSettingsUserScriptRow: View {
     let onDelete: () -> Void
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 12) {
             FullSettingsSwitch(isOn: script.isEnabled) {
                 onEnabledChange(!script.isEnabled)
             }
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(script.displayName)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 13, weight: .semibold))
                     .lineLimit(1)
 
                 Text(detailText)
@@ -530,39 +545,50 @@ private struct FullSettingsUserScriptRow: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
-
-            Spacer()
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             Text(script.injectionTime.label)
-                .font(.system(size: 11, weight: .medium))
+                .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
+                .padding(.horizontal, 8)
+                .frame(height: 22)
+                .background {
+                    Capsule(style: .continuous)
+                        .fill(Color.primary.opacity(0.07))
+                }
 
             Button(action: onEdit) {
                 Image(systemName: "pencil")
-                    .font(.system(size: 11, weight: .semibold))
-                    .frame(width: 28, height: 28)
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 30, height: 30)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .cursor(.pointingHand)
             .accessibilityLabel("Edit \(script.displayName)")
             .help("Edit")
 
             Button(action: onDelete) {
                 Image(systemName: "trash")
-                    .font(.system(size: 11, weight: .semibold))
-                    .frame(width: 28, height: 28)
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 30, height: 30)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .cursor(.pointingHand)
             .accessibilityLabel("Delete \(script.displayName)")
             .help("Delete")
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
         .background {
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(isEditing ? Color.primary.opacity(0.1) : Color.primary.opacity(0.04))
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(Color.primary.opacity(isEditing ? 0.1 : 0.05), lineWidth: 1)
         }
     }
 
@@ -608,10 +634,10 @@ private struct FullSettingsUserScriptEditor: View {
     let onCancel: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 10) {
                 Text(title)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 13, weight: .semibold))
 
                 Spacer()
 
@@ -630,23 +656,31 @@ private struct FullSettingsUserScriptEditor: View {
                 FullSettingsTextEditor(text: $draft.matchPatterns, minHeight: 58, isMonospaced: false)
             }
 
-            VStack(alignment: .leading, spacing: 6) {
-                FullSettingsLabel("Run At")
-                FullSettingsSegmentedControl {
-                    ForEach(BrowserUserScriptInjectionTime.allCases, id: \.rawValue) { injectionTime in
-                        FullSettingsSegmentButton(
-                            title: injectionTime.label,
-                            isSelected: draft.injectionTime == injectionTime
-                        ) {
-                            draft.injectionTime = injectionTime
+            HStack(alignment: .top, spacing: 24) {
+                VStack(alignment: .leading, spacing: 6) {
+                    FullSettingsLabel("Run At")
+                    SettingsSegmentedControl {
+                        ForEach(BrowserUserScriptInjectionTime.allCases, id: \.rawValue) { injectionTime in
+                            SettingsSegmentButton(
+                                title: injectionTime.label,
+                                isSelected: draft.injectionTime == injectionTime
+                            ) {
+                                draft.injectionTime = injectionTime
+                            }
                         }
                     }
                 }
-            }
 
-            Toggle("Main Frame Only", isOn: $draft.forMainFrameOnly)
-                .font(.system(size: 12, weight: .medium))
-                .toggleStyle(.switch)
+                VStack(alignment: .leading, spacing: 6) {
+                    FullSettingsLabel("Scope")
+                    Toggle("Main Frame Only", isOn: $draft.forMainFrameOnly)
+                        .font(.system(size: 12, weight: .medium))
+                        .toggleStyle(.switch)
+                        .frame(height: 34)
+                }
+
+                Spacer(minLength: 0)
+            }
 
             VStack(alignment: .leading, spacing: 6) {
                 FullSettingsLabel("Source")
@@ -654,26 +688,26 @@ private struct FullSettingsUserScriptEditor: View {
             }
 
             HStack(spacing: 8) {
-                FullSettingsActionButton(title: "Save", systemName: "checkmark") {
+                SettingsActionButton(title: "Save", systemName: "checkmark") {
                     onSave()
                 }
                 .disabled(!draft.canSave)
 
-                FullSettingsActionButton(title: "Cancel", systemName: "xmark") {
+                SettingsActionButton(title: "Cancel", systemName: "xmark") {
                     onCancel()
                 }
 
-                Spacer()
+                Spacer(minLength: 0)
             }
         }
-        .padding(10)
+        .padding(14)
         .background {
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(Color.primary.opacity(0.055))
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .fill(Color.primary.opacity(0.05))
         }
         .overlay {
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .stroke(Color.primary.opacity(0.09), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.09), lineWidth: 1)
         }
     }
 }
@@ -686,13 +720,13 @@ private struct FullSettingsTextField: View {
             .textFieldStyle(.plain)
             .font(.system(size: 12))
             .padding(.horizontal, 9)
-            .frame(height: 30)
+            .frame(height: 32)
             .background {
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill(Color.primary.opacity(0.07))
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.primary.opacity(0.06))
             }
             .overlay {
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .stroke(Color.primary.opacity(0.08), lineWidth: 1)
             }
     }
@@ -710,74 +744,12 @@ private struct FullSettingsTextEditor: View {
             .padding(6)
             .frame(minHeight: minHeight)
             .background {
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill(Color.primary.opacity(0.07))
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.primary.opacity(0.06))
             }
             .overlay {
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .stroke(Color.primary.opacity(0.08), lineWidth: 1)
-            }
-    }
-}
-
-private struct FullSettingsProfileRow: View {
-    let profile: BrowserProfile
-    let isSelected: Bool
-    let canDelete: Bool
-    let onSelect: () -> Void
-    let onEdit: () -> Void
-    let onDelete: () -> Void
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Button(action: onSelect) {
-                HStack(spacing: 9) {
-                    Circle()
-                        .fill(Color(nsColor: NSColor(hexString: profile.colorHex) ?? .systemBlue))
-                        .frame(width: 16, height: 16)
-
-                    Text(profile.displayName)
-                        .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
-                        .lineLimit(1)
-
-                    Spacer()
-
-                    if isSelected {
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 11, weight: .bold))
-                    }
-                }
-                .frame(height: 30)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .cursor(.pointingHand)
-
-            Button(action: onEdit) {
-                Image(systemName: "pencil")
-                    .font(.system(size: 11, weight: .semibold))
-                    .frame(width: 28, height: 28)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Edit \(profile.displayName)")
-            .help("Edit")
-
-            Button(action: onDelete) {
-                Image(systemName: "trash")
-                    .font(.system(size: 11, weight: .semibold))
-                    .frame(width: 28, height: 28)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .disabled(!canDelete)
-            .accessibilityLabel("Delete \(profile.displayName)")
-            .help("Delete")
-        }
-        .padding(.horizontal, 10)
-        .background {
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(isSelected ? Color.primary.opacity(0.1) : Color.clear)
         }
     }
 }

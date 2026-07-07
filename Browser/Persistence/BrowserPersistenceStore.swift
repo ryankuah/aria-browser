@@ -2,8 +2,7 @@ import Foundation
 
 struct BrowserStartupData: Sendable {
     var settings: [String: String] = [:]
-    var profiles: [StoredBrowserProfile] = []
-    var activeProfileID: UUID?
+    var storageProfileID: UUID?
     var userScripts: [StoredBrowserUserScript] = []
     var mediaPermissionDecisions: [StoredMediaPermissionDecision] = []
     var bookmarks: [StoredBrowserBookmark] = []
@@ -20,8 +19,7 @@ actor BrowserPersistenceStore {
     func loadStartupData() -> BrowserStartupData {
         var data = BrowserStartupData()
         data.settings = load(default: [:]) { try $0.loadSettings() }
-        data.profiles = load(default: []) { try $0.loadProfiles() }
-        data.activeProfileID = load(default: UUID?.none) { try $0.loadActiveProfileID() }
+        data.storageProfileID = load(default: UUID?.none) { try $0.ensureLocalProfile() }
         data.userScripts = load(default: []) { try $0.loadUserScripts() }
         data.mediaPermissionDecisions = load(default: []) { try $0.loadMediaPermissionDecisions() }
         data.autocompleteSites = load(default: []) { try $0.loadAutocompleteSites(limit: 500) }
@@ -29,18 +27,11 @@ actor BrowserPersistenceStore {
         data.downloads = load(default: []) { database in
             try Self.interruptActiveDownloads(database.loadRecentDownloads(limit: 50), database: database)
         }
-        let selectedProfileID = Self.selectedProfileID(from: data.profiles, activeProfileID: data.activeProfileID)
-        if let selectedProfileID {
-            data.bookmarks = load(default: []) { try $0.loadBookmarks(profileID: selectedProfileID) }
-            data.session = load(default: StoredBrowserSession?.none) { try $0.loadSession(profileID: selectedProfileID) }
+        if let storageProfileID = data.storageProfileID {
+            data.bookmarks = load(default: []) { try $0.loadBookmarks(profileID: storageProfileID) }
+            data.session = load(default: StoredBrowserSession?.none) { try $0.loadSession(profileID: storageProfileID) }
         }
         return data
-    }
-
-    func loadProfileState(profileID: UUID) -> (bookmarks: [StoredBrowserBookmark], session: StoredBrowserSession?) {
-        let bookmarks: [StoredBrowserBookmark] = load(default: []) { try $0.loadBookmarks(profileID: profileID) }
-        let session: StoredBrowserSession? = load(default: nil) { try $0.loadSession(profileID: profileID) }
-        return (bookmarks, session)
     }
 
     func saveSession(profileID: UUID, tabs: [BrowserTabSnapshot], selectedTabID: UUID?) {
@@ -80,26 +71,6 @@ actor BrowserPersistenceStore {
         save("Browser download save failed") {
             try $0.saveDownload(download)
         }
-    }
-
-    func saveProfile(_ profile: StoredBrowserProfile) {
-        save("Browser profile save failed") {
-            try $0.saveProfile(profile)
-        }
-    }
-
-    func deleteProfileAndReindex(id: UUID, activeProfileID: UUID?, remainingProfiles: [StoredBrowserProfile]) {
-        save("Browser profile delete failed") {
-            try $0.deleteProfileAndReindex(
-                id: id,
-                activeProfileID: activeProfileID,
-                remainingProfiles: remainingProfiles
-            )
-        }
-    }
-
-    func setActiveProfileID(_ id: UUID) {
-        saveSetting(key: "activeProfileID", value: id.uuidString)
     }
 
     func saveBookmark(_ bookmark: StoredBrowserBookmark, profileID: UUID) {
@@ -199,15 +170,6 @@ actor BrowserPersistenceStore {
         } catch {
             NSLog("\(failureMessage): \(error.localizedDescription)")
         }
-    }
-
-    private static func selectedProfileID(from profiles: [StoredBrowserProfile], activeProfileID: UUID?) -> UUID? {
-        if let activeProfileID,
-           profiles.contains(where: { $0.id == activeProfileID }) {
-            return activeProfileID
-        }
-
-        return profiles.sorted { $0.position < $1.position }.first?.id
     }
 
     private static func interruptActiveDownloads(_ downloads: [BrowserDownload], database: BrowserDatabase) throws -> [BrowserDownload] {

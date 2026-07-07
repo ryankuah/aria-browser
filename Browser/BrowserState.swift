@@ -25,8 +25,6 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
             refreshElementFullscreenState()
         }
     }
-    @Published private(set) var profiles: [BrowserProfile] = []
-    @Published private(set) var selectedProfileID: BrowserProfile.ID?
     @Published private(set) var hasLoadedStartupData = false
     @Published private(set) var bezelStyle: BrowserBezelStyle = .liquidGlass
     @Published private(set) var searchEngine: BrowserSearchEngine = .google
@@ -56,22 +54,14 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
     private var historyURLByTabID: [BrowserTab.ID: String] = [:]
     private var historyRecordTasksByTabID: [BrowserTab.ID: Task<Void, Never>] = [:]
     private var historyCursorSourceByTabID: [BrowserTab.ID: BrowserTab.ID] = [:]
-    private weak var cloudSync: BrowserCloudSynchronizing?
+    private var storageProfileID: UUID?
 
     var activeTab: BrowserTab? {
         tabs.first { $0.id == selectedTabID }
     }
 
-    var selectedProfile: BrowserProfile? {
-        profiles.first { $0.id == selectedProfileID }
-    }
-
-    var isOnboardingRequired: Bool {
-        hasLoadedStartupData && profiles.isEmpty
-    }
-
     var profileColorHex: String {
-        selectedProfile?.colorHex ?? BrowserProfile.defaultColorHex
+        BrowserAppearance.accentColorHex
     }
 
     var profileNSColor: NSColor {
@@ -148,29 +138,6 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
 
     func newTab(url: URL? = nil) {
         _ = createTab(url: url, persist: true)
-    }
-
-    func setCloudSync(_ cloudSync: BrowserCloudSynchronizing?) {
-        self.cloudSync = cloudSync
-        if let cloudSync {
-            Task {
-                await cloudSync.saveProfiles(profiles, activeProfileID: selectedProfileID)
-                await cloudSync.saveSettings([
-                    "activeProfileID": selectedProfileID?.uuidString ?? "",
-                    "bezelStyle": bezelStyle.rawValue,
-                    "searchEngine": searchEngine.rawValue
-                ])
-                if let selectedProfileID {
-                    let snapshot = cloudSessionSnapshot()
-                    await cloudSync.saveProfileState(
-                        profileID: selectedProfileID,
-                        tabs: snapshot.tabs,
-                        selectedTabID: snapshot.selectedTabID,
-                        bookmarks: bookmarks
-                    )
-                }
-            }
-        }
     }
 
     func openExternalURL(_ url: URL) {
@@ -691,9 +658,6 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         Task { [persistence] in
             await persistence.saveSetting(key: "bezelStyle", value: style.rawValue)
         }
-        Task { [cloudSync] in
-            await cloudSync?.saveSettings(["bezelStyle": style.rawValue])
-        }
     }
 
     func setSearchEngine(_ engine: BrowserSearchEngine) {
@@ -704,9 +668,6 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         searchEngine = engine
         Task { [persistence] in
             await persistence.saveSetting(key: "searchEngine", value: engine.rawValue)
-        }
-        Task { [cloudSync] in
-            await cloudSync?.saveSettings(["searchEngine": engine.rawValue])
         }
     }
 
@@ -808,152 +769,6 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
             )
         }
         applyUserScriptsToOpenTabs(reloadPages: true)
-    }
-
-    func createProfile(name: String, colorHex: String) {
-        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedName.isEmpty else {
-            return
-        }
-
-        let profile = BrowserProfile(
-            id: UUID(),
-            name: trimmedName,
-            colorHex: Self.normalizedProfileColorHex(colorHex),
-            position: profiles.count
-        )
-
-        profiles.append(profile)
-        Task { [persistence] in
-            await persistence.saveProfile(StoredBrowserProfile(
-                id: profile.id,
-                name: profile.name,
-                colorHex: profile.colorHex,
-                position: profile.position
-            ))
-        }
-        Task { [cloudSync, profiles] in
-            await cloudSync?.saveProfiles(profiles, activeProfileID: profile.id)
-        }
-
-        switchProfile(id: profile.id)
-    }
-
-    func updateProfile(id: BrowserProfile.ID, name: String, colorHex: String) {
-        guard let index = profiles.firstIndex(where: { $0.id == id }) else {
-            return
-        }
-
-        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedName.isEmpty else {
-            return
-        }
-
-        profiles[index].name = trimmedName
-        profiles[index].colorHex = Self.normalizedProfileColorHex(colorHex)
-        let profile = profiles[index]
-
-        Task { [persistence] in
-            await persistence.saveProfile(StoredBrowserProfile(
-                id: profile.id,
-                name: profile.name,
-                colorHex: profile.colorHex,
-                position: profile.position
-            ))
-        }
-        Task { [cloudSync, profiles, selectedProfileID] in
-            await cloudSync?.saveProfiles(profiles, activeProfileID: selectedProfileID)
-        }
-    }
-
-    func deleteProfile(id: BrowserProfile.ID) {
-        guard let index = profiles.firstIndex(where: { $0.id == id }) else {
-            return
-        }
-
-        let wasSelectedProfile = selectedProfileID == id
-        if wasSelectedProfile {
-            persistSessionImmediately()
-            sessionPersistenceTask?.cancel()
-        }
-
-        profiles.remove(at: index)
-        for profileIndex in profiles.indices {
-            profiles[profileIndex].position = profileIndex
-        }
-
-        let nextSelectedProfileID = Self.selectedProfileID(from: profiles, storedID: selectedProfileID == id ? nil : selectedProfileID)
-        let remainingProfiles = profiles
-
-        if wasSelectedProfile {
-            selectedProfileID = nextSelectedProfileID
-            isApplyingStoredState = true
-            resetProfileScopedState()
-            isApplyingStoredState = false
-        }
-
-        Task { [weak self, persistence] in
-            await persistence.deleteProfileAndReindex(
-                id: id,
-                activeProfileID: nextSelectedProfileID,
-                remainingProfiles: remainingProfiles.map {
-                    StoredBrowserProfile(
-                        id: $0.id,
-                        name: $0.name,
-                        colorHex: $0.colorHex,
-                        position: $0.position
-                    )
-                }
-            )
-
-            guard wasSelectedProfile, let nextSelectedProfileID else {
-                return
-            }
-
-            let profileState = await persistence.loadProfileState(profileID: nextSelectedProfileID)
-            await MainActor.run {
-                guard self?.selectedProfileID == nextSelectedProfileID else {
-                    return
-                }
-
-                self?.applyProfileState(bookmarks: profileState.bookmarks, session: profileState.session)
-            }
-        }
-        Task { [cloudSync, remainingProfiles] in
-            await cloudSync?.saveProfiles(remainingProfiles, activeProfileID: nextSelectedProfileID)
-        }
-    }
-
-    func switchProfile(id: BrowserProfile.ID) {
-        guard profiles.contains(where: { $0.id == id }),
-              selectedProfileID != id else {
-            return
-        }
-
-        persistSessionImmediately()
-        sessionPersistenceTask?.cancel()
-        selectedProfileID = id
-        Task { [persistence] in
-            await persistence.setActiveProfileID(id)
-        }
-        Task { [cloudSync] in
-            await cloudSync?.saveSettings(["activeProfileID": id.uuidString])
-        }
-
-        isApplyingStoredState = true
-        resetProfileScopedState()
-        isApplyingStoredState = false
-
-        Task { [weak self, persistence] in
-            let profileState = await persistence.loadProfileState(profileID: id)
-            await MainActor.run {
-                guard self?.selectedProfileID == id else {
-                    return
-                }
-
-                self?.applyProfileState(bookmarks: profileState.bookmarks, session: profileState.session)
-            }
-        }
     }
 
     func toggleActivePageMediaPermission(_ kind: BrowserMediaDeviceKind) {
@@ -1203,33 +1018,25 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         isApplyingStoredState = true
 
         applySettings(startupData.settings)
-        profiles = startupData.profiles.map { storedProfile in
-            BrowserProfile(
-                id: storedProfile.id,
-                name: storedProfile.name,
-                colorHex: storedProfile.colorHex,
-                position: storedProfile.position
-            )
-        }
-        selectedProfileID = Self.selectedProfileID(from: profiles, storedID: startupData.activeProfileID)
+        storageProfileID = startupData.storageProfileID
         applyUserScripts(startupData.userScripts)
         applyMediaPermissionDecisions(startupData.mediaPermissionDecisions)
         downloads = startupData.downloads
         applyAutocompleteSites(startupData.autocompleteSites)
         applyAutocompletePages(startupData.autocompletePages)
-        if selectedProfileID != nil {
-            applyProfileState(bookmarks: startupData.bookmarks, session: startupData.session)
+        if storageProfileID != nil {
+            applyStoredBrowserState(bookmarks: startupData.bookmarks, session: startupData.session)
         } else {
-            resetProfileScopedState()
+            resetStoredBrowserState()
         }
 
         isApplyingStoredState = false
         hasLoadedStartupData = true
     }
 
-    private func applyProfileState(bookmarks storedBookmarks: [StoredBrowserBookmark], session: StoredBrowserSession?) {
+    private func applyStoredBrowserState(bookmarks storedBookmarks: [StoredBrowserBookmark], session: StoredBrowserSession?) {
         isApplyingStoredState = true
-        resetProfileScopedState()
+        resetStoredBrowserState()
         bookmarks = storedBookmarks.map { storedBookmark in
             BrowserBookmark(
                 id: storedBookmark.id,
@@ -1433,13 +1240,6 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
 
         let restoredTabs = session.tabs
             .sorted { $0.position < $1.position }
-            .filter { storedTab in
-                guard let url = storedTab.url else {
-                    return true
-                }
-
-                return !BrowserNavigation.isTransientOAuthURL(url)
-            }
             .map { storedTab in
                 let tab = makeTab(id: storedTab.id, title: storedTab.title, url: storedTab.url)
                 historyCursorByTabID[tab.id] = BrowserHistoryCursor(journeyID: UUID())
@@ -1456,7 +1256,7 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         }
     }
 
-    private func resetProfileScopedState() {
+    private func resetStoredBrowserState() {
         bookmarkFaviconTasks.values.forEach { $0.cancel() }
         bookmarkFaviconTasks.removeAll()
         mountedTabIDs.removeAll()
@@ -1530,21 +1330,6 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
             consoleMessageHandler: BrowserConsoleScriptMessageHandler(browser: self),
             userScripts: userScripts
         )
-    }
-
-    private static func selectedProfileID(from profiles: [BrowserProfile], storedID: UUID?) -> UUID? {
-        if let storedID,
-           profiles.contains(where: { $0.id == storedID }) {
-            return storedID
-        }
-
-        return profiles.sorted { $0.position < $1.position }.first?.id
-    }
-
-    private static func normalizedProfileColorHex(_ rawValue: String) -> String {
-        let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let prefixedValue = value.hasPrefix("#") ? value : "#\(value)"
-        return NSColor(hexString: prefixedValue)?.hexString ?? BrowserProfile.defaultColorHex
     }
 
     private static func normalizedUserScriptMatchPatterns(_ rawValue: String) -> String {
@@ -2027,10 +1812,6 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
     }
 
     private func tabURLDidChange(_ tab: BrowserTab, url: URL) {
-        guard !BrowserNavigation.isTransientOAuthURL(url) else {
-            return
-        }
-
         persistSession()
 
         let urlString = url.absoluteString
@@ -2055,10 +1836,6 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         url: URL,
         title: String
     ) {
-        guard !BrowserNavigation.isTransientOAuthURL(url) else {
-            return
-        }
-
         let previousTask = historyRecordTasksByTabID[tabID]
         let task = Task { [weak self, persistence] in
             await previousTask?.value
@@ -2098,18 +1875,6 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
                 journeyID: treeRelationship.journeyID,
                 parentVisitID: treeRelationship.parentVisitID
             )
-            if let cloudSync = await MainActor.run(body: { self?.cloudSync }) {
-                await cloudSync.recordHistoryVisit(BrowserCloudHistoryVisit(
-                    clientId: visitID.map { String($0) } ?? UUID().uuidString,
-                    url: url,
-                    title: title,
-                    tabID: tabID,
-                    journeyID: treeRelationship.journeyID,
-                    parentVisitID: treeRelationship.parentVisitID.map { String($0) },
-                    visitedAt: Date(),
-                    origin: BrowserNavigation.originKey(for: url)
-                ))
-            }
 
             await MainActor.run {
                 if let visitID {
@@ -2172,7 +1937,7 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
     }
 
     private func persistSession() {
-        guard !isApplyingStoredState, let selectedProfileID else {
+        guard !isApplyingStoredState, let storageProfileID else {
             return
         }
 
@@ -2185,56 +1950,30 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
                 return
             }
             await persistence.saveSession(
-                profileID: selectedProfileID,
+                profileID: storageProfileID,
                 tabs: snapshot.tabs,
                 selectedTabID: snapshot.selectedTabID
-            )
-        }
-        Task { [cloudSync, bookmarks] in
-            await cloudSync?.saveProfileState(
-                profileID: selectedProfileID,
-                tabs: snapshot.tabs,
-                selectedTabID: snapshot.selectedTabID,
-                bookmarks: bookmarks
             )
         }
     }
 
     private func persistSessionImmediately() {
-        guard let selectedProfileID else {
+        guard let storageProfileID else {
             return
         }
 
         let snapshot = sessionSnapshot()
         Task { [persistence] in
             await persistence.saveSession(
-                profileID: selectedProfileID,
+                profileID: storageProfileID,
                 tabs: snapshot.tabs,
                 selectedTabID: snapshot.selectedTabID
             )
         }
-        Task { [cloudSync, bookmarks] in
-            await cloudSync?.saveProfileState(
-                profileID: selectedProfileID,
-                tabs: snapshot.tabs,
-                selectedTabID: snapshot.selectedTabID,
-                bookmarks: bookmarks
-            )
-        }
-    }
-
-    func cloudSessionSnapshot() -> (tabs: [BrowserTabSnapshot], selectedTabID: UUID?) {
-        sessionSnapshot()
     }
 
     private func sessionSnapshot() -> (tabs: [BrowserTabSnapshot], selectedTabID: UUID?) {
-        let sessionTabs = tabs.filter { tab in
-            guard let url = tab.url else {
-                return true
-            }
-
-            return !BrowserNavigation.isTransientOAuthURL(url)
-        }
+        let sessionTabs = tabs
         let persistedSelectedTabID = sessionTabs.contains { $0.id == selectedTabID } ? selectedTabID : sessionTabs.first?.id
         let snapshots = sessionTabs.enumerated().map { index, tab in
             BrowserTabSnapshot(
@@ -2271,7 +2010,7 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
     }
 
     private func persistBookmark(_ bookmark: BrowserBookmark, position: Int) {
-        guard let selectedProfileID else {
+        guard let storageProfileID else {
             return
         }
 
@@ -2282,21 +2021,12 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
             url: bookmark.url
         )
         Task { [persistence] in
-            await persistence.saveBookmark(storedBookmark, profileID: selectedProfileID)
-        }
-        let snapshot = sessionSnapshot()
-        Task { [cloudSync, bookmarks] in
-            await cloudSync?.saveProfileState(
-                profileID: selectedProfileID,
-                tabs: snapshot.tabs,
-                selectedTabID: snapshot.selectedTabID,
-                bookmarks: bookmarks
-            )
+            await persistence.saveBookmark(storedBookmark, profileID: storageProfileID)
         }
     }
 
     private func removeBookmark(id: BrowserBookmark.ID) {
-        guard let selectedProfileID else {
+        guard let storageProfileID else {
             return
         }
 
@@ -2315,17 +2045,8 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         Task { [persistence] in
             await persistence.deleteBookmarkAndReindex(
                 id: id,
-                profileID: selectedProfileID,
+                profileID: storageProfileID,
                 remainingBookmarks: remainingBookmarks
-            )
-        }
-        let snapshot = sessionSnapshot()
-        Task { [cloudSync, bookmarks] in
-            await cloudSync?.saveProfileState(
-                profileID: selectedProfileID,
-                tabs: snapshot.tabs,
-                selectedTabID: snapshot.selectedTabID,
-                bookmarks: bookmarks
             )
         }
     }

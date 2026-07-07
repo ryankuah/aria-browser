@@ -28,16 +28,6 @@
 		</dict>
 		<dict>
 			<key>CFBundleTypeRole</key>
-			<string>Editor</string>
-			<key>CFBundleURLName</key>
-			<string>Auth Callback</string>
-			<key>CFBundleURLSchemes</key>
-			<array>
-				<string>com.ryankuah.browser</string>
-			</array>
-		</dict>
-		<dict>
-			<key>CFBundleTypeRole</key>
 			<string>Viewer</string>
 			<key>CFBundleURLName</key>
 			<string>Web URLs</string>
@@ -52,19 +42,11 @@
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
-	<key>BrowserConvexURL</key>
-	<string></string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.productivity</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Browser needs camera access for websites you allow.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Browser needs microphone access for websites you allow.</string>
-	<key>SUEnableInstallerLauncherService</key>
-	<true/>
-	<key>SUFeedURL</key>
-	<string>https://github.com/ryankuah/browser/releases/latest/download/appcast.xml</string>
-	<key>SUPublicEDKey</key>
-	<string>sCC3kVj4ep54x4BAxkn1wNHWNKA/UJFCO48gyrkJP9k=</string>
 </dict>
 </plist>

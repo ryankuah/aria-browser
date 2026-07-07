@@ -210,8 +210,13 @@ final class BrowserWebContainerView: NSView {
 
 final class BrowserWebView: WKWebView {
     private static let defaultInitialFrame = CGRect(x: 0, y: 0, width: 1280, height: 800)
-    static let desktopSafariUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"
+    // Safari deliberately freezes the macOS token at 10_15_7 and reports a fixed
+    // WebKit build rather than leaking the host OS version; we mirror that exactly
+    // so sites treat us like Safari. Keep the version tokens in one place so the
+    // full UA and the `applicationNameForUserAgent` suffix can never drift apart.
+    private static let webKitBuildToken = "AppleWebKit/605.1.15 (KHTML, like Gecko)"
     static let safariUserAgentSuffix = "Version/18.0 Safari/605.1.15"
+    static let desktopSafariUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \(webKitBuildToken) \(safariUserAgentSuffix)"
     private var isPointerShieldUpdatePending = false
 
     var isElementFullscreenTransitionActive: Bool {
@@ -248,8 +253,20 @@ final class BrowserWebView: WKWebView {
     override init(frame: CGRect, configuration: WKWebViewConfiguration) {
         super.init(frame: frame == .zero ? Self.defaultInitialFrame : frame, configuration: configuration)
         allowsBackForwardNavigationGestures = true
-        setValue(false, forKey: "drawsBackground")
+        makeBackgroundTransparent()
         customUserAgent = Self.desktopSafariUserAgent
+    }
+
+    /// macOS `WKWebView` exposes no public API to render with a transparent
+    /// background, so we clear the `drawsBackground` flag — the long-standing
+    /// approach used by Safari's own embedders — to let the rounded container and
+    /// window chrome show through instead of an opaque white fill. The KVC key is
+    /// isolated here so the single private-API touch is intentional and auditable,
+    /// and we pair it with the public `underPageBackgroundColor` for the overscroll
+    /// gutter so the two stay visually consistent.
+    private func makeBackgroundTransparent() {
+        setValue(false, forKey: "drawsBackground")
+        underPageBackgroundColor = .clear
     }
 
     @available(*, unavailable)
@@ -407,17 +424,12 @@ final class BrowserWebView: WKWebView {
     }
 
     private static func pointerShieldScript(rects: [CGRect]) -> String {
-        let rectJSON = rects.map { rect in
-            """
-            {"left":\(String(format: "%.2f", rect.minX)),"top":\(String(format: "%.2f", rect.minY)),"width":\(String(format: "%.2f", rect.width)),"height":\(String(format: "%.2f", rect.height))}
-            """
-        }
-            .joined(separator: ",")
+        let rectsJSON = rectsJSONLiteral(for: rects)
 
         return #"""
         (() => {
           const rootId = "__browserPointerShields";
-          const rects = [RECTS];
+          const rects = \#(rectsJSON);
           let root = document.getElementById(rootId);
 
           if (!root) {
@@ -477,7 +489,28 @@ final class BrowserWebView: WKWebView {
           });
         })();
         """#
-            .replacingOccurrences(of: "RECTS", with: rectJSON)
+    }
+
+    /// Serializes the shield rects as a JSON array literal that can be embedded
+    /// directly into the injected script. Using `JSONSerialization` keeps the
+    /// payload well-formed regardless of the values instead of hand-splicing
+    /// numbers into a string template.
+    private static func rectsJSONLiteral(for rects: [CGRect]) -> String {
+        let payload = rects.map { rect in
+            [
+                "left": Double(rect.minX),
+                "top": Double(rect.minY),
+                "width": Double(rect.width),
+                "height": Double(rect.height)
+            ]
+        }
+
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
+              let json = String(data: data, encoding: .utf8) else {
+            return "[]"
+        }
+
+        return json
     }
 
     private static func installConfiguredUserScripts(
@@ -492,12 +525,6 @@ final class BrowserWebView: WKWebView {
                 forMainFrameOnly: false
             ))
         }
-
-        userContentController.addUserScript(WKUserScript(
-            source: videoSkipPromptScript,
-            injectionTime: .atDocumentEnd,
-            forMainFrameOnly: false
-        ))
 
         for userScript in userScripts where userScript.isRunnable {
             userContentController.addUserScript(WKUserScript(
@@ -656,288 +683,6 @@ final class BrowserWebView: WKWebView {
       diagnostics("document-start");
       window.addEventListener("DOMContentLoaded", () => diagnostics("dom-content-loaded"), { once: true });
       window.addEventListener("load", () => diagnostics("window-load"), { once: true });
-    })();
-    """#
-
-    private static let videoSkipPromptScript = #"""
-    (() => {
-      if (window.__browserVideoSkipPromptInstalled) return;
-      window.__browserVideoSkipPromptInstalled = true;
-
-      const rootId = "__browserVideoSkipPrompt";
-      const scanDelayMs = 250;
-      const intervalMs = 1000;
-      const labels = [
-        "skip video",
-        "skip intro",
-        "next episode"
-      ];
-      const clickableSelector = [
-        "button",
-        "a[href]",
-        "[role='button']",
-        "[role='link']",
-        "[tabindex]",
-        "[onclick]",
-        "[data-uia]",
-        "[aria-label]",
-        "[title]"
-      ].join(",");
-      const ignoredTextEntryTypes = new Set([
-        "email",
-        "number",
-        "password",
-        "search",
-        "tel",
-        "text",
-        "url"
-      ]);
-
-      let activeTarget = null;
-      let scanTimer = 0;
-
-      const normalize = value => String(value || "")
-        .replace(/\s+/g, " ")
-        .trim()
-        .toLowerCase();
-
-      const getRoot = () => {
-        let root = document.getElementById(rootId);
-        if (root) return root;
-
-        root = document.createElement("div");
-        root.id = rootId;
-        root.setAttribute("aria-hidden", "true");
-        Object.assign(root.style, {
-          position: "fixed",
-          left: "0",
-          top: "0",
-          zIndex: "2147483647",
-          pointerEvents: "none",
-          display: "none",
-          padding: "5px 8px",
-          borderRadius: "999px",
-          border: "1px solid rgba(255, 255, 255, 0.22)",
-          background: "rgba(8, 10, 13, 0.88)",
-          color: "white",
-          boxShadow: "0 8px 24px rgba(0, 0, 0, 0.36)",
-          font: "600 12px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
-          lineHeight: "1",
-          letterSpacing: "0",
-          whiteSpace: "nowrap",
-          backdropFilter: "blur(14px)",
-          WebkitBackdropFilter: "blur(14px)"
-        });
-
-        const key = document.createElement("span");
-        key.textContent = "S";
-        Object.assign(key.style, {
-          display: "inline-flex",
-          alignItems: "center",
-          justifyContent: "center",
-          minWidth: "18px",
-          height: "18px",
-          marginRight: "6px",
-          borderRadius: "5px",
-          background: "rgba(255, 255, 255, 0.16)",
-          boxShadow: "inset 0 -1px 0 rgba(0, 0, 0, 0.32)",
-          fontSize: "11px"
-        });
-
-        const label = document.createElement("span");
-        label.textContent = "Skip";
-
-        root.append(key, label);
-        (document.documentElement || document.body).appendChild(root);
-        return root;
-      };
-
-      const hidePrompt = () => {
-        const root = document.getElementById(rootId);
-        if (root) root.style.display = "none";
-        activeTarget = null;
-      };
-
-      const isVisible = element => {
-        if (!(element instanceof Element) || element.id === rootId) return false;
-
-        const style = getComputedStyle(element);
-        if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) return false;
-
-        const rect = element.getBoundingClientRect();
-        if (rect.width < 10 || rect.height < 10) return false;
-        if (rect.bottom <= 0 || rect.right <= 0 || rect.top >= innerHeight || rect.left >= innerWidth) return false;
-
-        return true;
-      };
-
-      const elementText = element => normalize([
-        element.innerText,
-        element.textContent,
-        element.getAttribute("aria-label"),
-        element.getAttribute("title"),
-        element.getAttribute("data-uia"),
-        element.getAttribute("data-testid")
-      ].filter(Boolean).join(" "));
-
-      const scoreElement = element => {
-        if (!isVisible(element)) return 0;
-
-        const text = elementText(element);
-        if (!text) return 0;
-
-        let score = 0;
-        for (const label of labels) {
-          if (text === label) score = Math.max(score, 100);
-          else if (text.includes(label)) score = Math.max(score, 80);
-        }
-
-        if (!score) return 0;
-
-        const tagName = element.tagName.toLowerCase();
-        const role = normalize(element.getAttribute("role"));
-        if (tagName === "button" || role === "button") score += 20;
-        if (element.disabled || element.getAttribute("aria-disabled") === "true") score -= 50;
-        if (element.closest("nav, header, footer")) score -= 15;
-
-        return score;
-      };
-
-      const candidateElements = () => {
-        const elements = new Set();
-        for (const element of document.querySelectorAll(clickableSelector)) {
-          elements.add(element);
-          const actionableParent = element.closest("button, a[href], [role='button'], [onclick]");
-          if (actionableParent) elements.add(actionableParent);
-        }
-        return [...elements];
-      };
-
-      const findTarget = () => candidateElements()
-        .map(element => ({ element, score: scoreElement(element) }))
-        .filter(candidate => candidate.score > 0)
-        .sort((a, b) => b.score - a.score)[0]?.element || null;
-
-      const positionPrompt = target => {
-        if (!isVisible(target)) {
-          hidePrompt();
-          return;
-        }
-
-        const root = getRoot();
-        root.style.display = "inline-flex";
-        root.style.alignItems = "center";
-
-        const targetRect = target.getBoundingClientRect();
-        const promptRect = root.getBoundingClientRect();
-        const gap = 8;
-        let left = targetRect.right + gap;
-        let top = targetRect.top + ((targetRect.height - promptRect.height) / 2);
-
-        if (left + promptRect.width > innerWidth - gap) {
-          left = targetRect.left - promptRect.width - gap;
-        }
-
-        if (left < gap) {
-          left = Math.min(Math.max(targetRect.left, gap), innerWidth - promptRect.width - gap);
-          top = targetRect.top - promptRect.height - gap;
-        }
-
-        top = Math.min(Math.max(top, gap), innerHeight - promptRect.height - gap);
-        root.style.transform = `translate(${Math.round(left)}px, ${Math.round(top)}px)`;
-      };
-
-      const scan = () => {
-        scanTimer = 0;
-
-        if (!document.documentElement || !document.body) {
-          hidePrompt();
-          return;
-        }
-
-        const target = findTarget();
-        activeTarget = target;
-
-        if (!target) {
-          hidePrompt();
-          return;
-        }
-
-        positionPrompt(target);
-      };
-
-      const scheduleScan = () => {
-        if (scanTimer) return;
-        scanTimer = window.setTimeout(scan, scanDelayMs);
-      };
-
-      const clickTarget = target => {
-        const clickable = target.closest("button, a[href], [role='button'], [onclick]") || target;
-        clickable.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, cancelable: true, view: window }));
-        clickable.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
-        clickable.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
-        clickable.click();
-      };
-
-      const isEditingText = element => {
-        if (!(element instanceof Element)) return false;
-        if (element.isContentEditable) return true;
-
-        const tagName = element.tagName.toLowerCase();
-        if (tagName === "textarea" || tagName === "select") return true;
-        if (tagName !== "input") return false;
-
-        const type = normalize(element.getAttribute("type") || "text");
-        return ignoredTextEntryTypes.has(type);
-      };
-
-      const isTextEntryEvent = event => {
-        const path = typeof event.composedPath === "function" ? event.composedPath() : [event.target];
-        return path.some(isEditingText) || isEditingText(document.activeElement);
-      };
-
-      const onKeyDown = event => {
-        if (event.defaultPrevented || event.metaKey || event.altKey || event.ctrlKey) return;
-        if (normalize(event.key) !== "s") return;
-        if (isTextEntryEvent(event)) return;
-
-        const target = activeTarget && scoreElement(activeTarget) > 0 ? activeTarget : findTarget();
-        if (!target) return;
-
-        event.preventDefault();
-        event.stopPropagation();
-        clickTarget(target);
-        window.setTimeout(scan, 200);
-      };
-
-      const isPromptMutation = record => {
-        const target = record.target;
-        return target instanceof Element && (target.id === rootId || !!target.closest(`#${rootId}`));
-      };
-
-      const observer = new MutationObserver(records => {
-        if (!records.every(isPromptMutation)) scheduleScan();
-      });
-      const start = () => {
-        observer.observe(document.documentElement, {
-          childList: true,
-          subtree: true,
-          attributes: true,
-          attributeFilter: ["aria-label", "class", "disabled", "hidden", "role", "style", "title"]
-        });
-
-        document.addEventListener("keydown", onKeyDown, true);
-        window.addEventListener("resize", scheduleScan);
-        window.addEventListener("scroll", scheduleScan, true);
-        window.setInterval(scan, intervalMs);
-        scan();
-      };
-
-      if (document.documentElement && document.body) {
-        start();
-      } else {
-        document.addEventListener("DOMContentLoaded", start, { once: true });
-      }
     })();
     """#
 

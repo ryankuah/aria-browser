@@ -7,9 +7,6 @@ struct BrowserSettingsPanel: View {
     let profileColor: NSColor
     let onOpenFullSettings: () -> Void
 
-    @State private var isAddingProfile = false
-    @State private var editingProfileID: BrowserProfile.ID?
-
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
@@ -26,90 +23,6 @@ struct BrowserSettingsPanel: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
-                    VStack(alignment: .leading, spacing: 7) {
-                        HStack {
-                            Text("Profiles")
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundStyle(.secondary)
-
-                            Spacer()
-
-                            Button {
-                                withAnimation(.easeInOut(duration: 0.14)) {
-                                    isAddingProfile.toggle()
-                                }
-                            } label: {
-                                Image(systemName: isAddingProfile ? "minus" : "plus")
-                                    .font(.system(size: 11, weight: .bold))
-                                    .frame(width: 24, height: 22)
-                                    .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel(isAddingProfile ? "Cancel Profile" : "Add Profile")
-                            .help(isAddingProfile ? "Cancel" : "Add Profile")
-                        }
-
-                        if isAddingProfile {
-                            ProfileCreationPanel(
-                                title: "New Profile",
-                                defaultName: "",
-                                defaultColor: NSColor(hexString: BrowserProfile.defaultColorHex) ?? .systemBlue,
-                                profileColor: profileColor
-                            ) { name, colorHex in
-                                browser.createProfile(name: name, colorHex: colorHex)
-                                withAnimation(.easeInOut(duration: 0.14)) {
-                                    isAddingProfile = false
-                                }
-                            }
-                            .transition(.move(edge: .top).combined(with: .opacity))
-                        }
-
-                        if let editingProfile = editingProfile {
-                            ProfileCreationPanel(
-                                title: "Edit Profile",
-                                defaultName: editingProfile.displayName,
-                                defaultColor: NSColor(hexString: editingProfile.colorHex) ?? .systemBlue,
-                                submitTitle: "Save",
-                                profileColor: profileColor
-                            ) { name, colorHex in
-                                browser.updateProfile(id: editingProfile.id, name: name, colorHex: colorHex)
-                                withAnimation(.easeInOut(duration: 0.14)) {
-                                    editingProfileID = nil
-                                }
-                            }
-                            .transition(.move(edge: .top).combined(with: .opacity))
-                        }
-
-                        HStack(spacing: 6) {
-                            ForEach(browser.profiles) { profile in
-                                ProfileDotButton(
-                                    profile: profile,
-                                    isSelected: browser.selectedProfileID == profile.id,
-                                    onSelect: {
-                                        browser.switchProfile(id: profile.id)
-                                    },
-                                    onEdit: {
-                                        withAnimation(.easeInOut(duration: 0.14)) {
-                                            isAddingProfile = false
-                                            editingProfileID = profile.id
-                                        }
-                                    },
-                                    onDelete: {
-                                        withAnimation(.easeInOut(duration: 0.14)) {
-                                            if editingProfileID == profile.id {
-                                                editingProfileID = nil
-                                            }
-                                            browser.deleteProfile(id: profile.id)
-                                        }
-                                    }
-                                )
-                            }
-                        }
-                    }
-
-                    Divider()
-                        .opacity(0.38)
-
                     VStack(alignment: .leading, spacing: 7) {
                         Text("Bezel Style")
                             .font(.system(size: 11, weight: .medium))
@@ -131,9 +44,6 @@ struct BrowserSettingsPanel: View {
                         .opacity(0.38)
 
                     DefaultBrowserSettingsSection()
-
-                    Divider()
-                        .opacity(0.38)
 
                     VStack(alignment: .leading, spacing: 7) {
                         Text("Page Zoom")
@@ -200,19 +110,12 @@ struct BrowserSettingsPanel: View {
                 .stroke(Color.primary.opacity(0.12), lineWidth: 1)
         }
     }
-
-    private var editingProfile: BrowserProfile? {
-        guard let editingProfileID else {
-            return nil
-        }
-
-        return browser.profiles.first { $0.id == editingProfileID }
-    }
 }
 
 @MainActor
 private final class DefaultBrowserController: ObservableObject {
     @Published private(set) var isDefaultBrowser = false
+    @Published private(set) var didRefresh = false
     @Published private(set) var isUpdating = false
     @Published private(set) var errorMessage: String?
 
@@ -220,6 +123,7 @@ private final class DefaultBrowserController: ObservableObject {
 
     func refresh() {
         isDefaultBrowser = urlSchemes.allSatisfy(Self.isCurrentAppDefaultHandler(for:))
+        didRefresh = true
     }
 
     func setAsDefaultBrowser() {
@@ -280,53 +184,59 @@ private struct DefaultBrowserSettingsSection: View {
     @State private var isHovered = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            Text("Default Browser")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.secondary)
+        Group {
+            if controller.didRefresh && !controller.isDefaultBrowser {
+                VStack(alignment: .leading, spacing: 7) {
+                    Text("Default Browser")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
 
-            Button {
-                controller.setAsDefaultBrowser()
-            } label: {
-                HStack(spacing: 7) {
-                    if controller.isUpdating {
-                        ProgressView()
-                            .controlSize(.small)
-                            .frame(width: 14, height: 14)
-                    } else {
-                        Image(systemName: iconSystemName)
-                            .font(.system(size: 12, weight: .semibold))
-                            .frame(width: 14, height: 14)
+                    Button {
+                        controller.setAsDefaultBrowser()
+                    } label: {
+                        HStack(spacing: 7) {
+                            if controller.isUpdating {
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .frame(width: 14, height: 14)
+                            } else {
+                                Image(systemName: iconSystemName)
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .frame(width: 14, height: 14)
+                            }
+
+                            Text(title)
+                                .font(.system(size: 11, weight: .semibold))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.82)
+
+                            Spacer(minLength: 0)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 30)
+                        .padding(.horizontal, 8)
+                        .contentShape(Rectangle())
                     }
+                    .buttonStyle(.plain)
+                    .disabled(controller.isUpdating)
+                    .foregroundStyle(foregroundStyle)
+                    .background {
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .fill(backgroundColor)
+                    }
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .stroke(borderColor, lineWidth: 1)
+                    }
+                    .onHover { isHovered = $0 }
+                    .cursor(controller.isUpdating ? .arrow : .pointingHand)
+                    .accessibilityLabel(title)
+                    .help(helpText)
 
-                    Text(title)
-                        .font(.system(size: 11, weight: .semibold))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.82)
-
-                    Spacer(minLength: 0)
+                    Divider()
+                        .opacity(0.38)
                 }
-                .frame(maxWidth: .infinity)
-                .frame(height: 30)
-                .padding(.horizontal, 8)
-                .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
-            .disabled(controller.isUpdating || controller.isDefaultBrowser)
-            .foregroundStyle(foregroundStyle)
-            .background {
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill(backgroundColor)
-            }
-            .overlay {
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .stroke(borderColor, lineWidth: 1)
-            }
-            .opacity(controller.isDefaultBrowser ? 0.86 : 1)
-            .onHover { isHovered = $0 }
-            .cursor(controller.isUpdating || controller.isDefaultBrowser ? .arrow : .pointingHand)
-            .accessibilityLabel(title)
-            .help(helpText)
         }
         .onAppear {
             controller.refresh()
@@ -473,38 +383,6 @@ private struct SettingsZoomButton: View {
         .onHover { isHovered = $0 }
         .accessibilityLabel(label)
         .help(label)
-    }
-}
-
-private struct ProfileDotButton: View {
-    let profile: BrowserProfile
-    let isSelected: Bool
-    let onSelect: () -> Void
-    let onEdit: () -> Void
-    let onDelete: () -> Void
-
-    var body: some View {
-        Button(action: onSelect) {
-            Circle()
-                .fill(Color(nsColor: NSColor(hexString: profile.colorHex) ?? .systemBlue))
-                .frame(width: 18, height: 18)
-                .overlay {
-                    if isSelected {
-                        Circle()
-                            .stroke(Color.primary.opacity(0.7), lineWidth: 2)
-                    }
-                }
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .contextMenu {
-            Button("Edit", action: onEdit)
-            Button(role: .destructive, action: onDelete) {
-                Text("Delete")
-            }
-        }
-        .accessibilityLabel(profile.displayName)
-        .help(profile.displayName)
     }
 }
 

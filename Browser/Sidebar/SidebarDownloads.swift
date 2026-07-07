@@ -3,7 +3,6 @@ import SwiftUI
 
 struct DownloadsFooter: View {
     @ObservedObject var browser: BrowserState
-    @ObservedObject var updateController: BrowserUpdateController
     @Binding var isPresented: Bool
     @Binding var isSettingsPresented: Bool
     let onOpenFullSettings: () -> Void
@@ -36,17 +35,6 @@ struct DownloadsFooter: View {
 
             HStack {
                 Spacer()
-
-                if updateController.isUpdateButtonVisible {
-                    SidebarIconButton(
-                        systemName: updateController.updateButtonIconSystemName,
-                        label: updateController.updateButtonHelp
-                    ) {
-                        updateController.performUpdateButtonAction()
-                    }
-                    .disabled(updateController.state == .downloading || updateController.state == .extracting || updateController.state == .installing)
-                    .transition(.scale(scale: 0.82).combined(with: .opacity))
-                }
 
                 SidebarIconButton(
                     systemName: "clock.arrow.circlepath",

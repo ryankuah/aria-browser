@@ -2,31 +2,29 @@
 
 A SwiftUI/WebKit browser experiment.
 
-## Release
+## App Store Release
 
-The release flow requires:
+This app is configured for Mac App Store distribution.
 
-- A Developer ID Application certificate installed in Keychain Access.
-- A stored notarytool profile, for example:
+Before submitting, confirm the App Store Connect app record and bundle ID are set up for:
 
-  ```sh
-  xcrun notarytool store-credentials browser-notary \
-    --apple-id you@example.com \
-    --team-id TEAMID \
-    --password app-specific-password
-  ```
+- Bundle ID: `com.ryankuah.browser`
+- App Sandbox enabled through `Browser/Browser.entitlements`
+- App Store signing in Xcode
+- Privacy, age rating, export compliance, screenshots, and review metadata in App Store Connect
 
-- The Sparkle `sign_update` tool at `build/sparkle-tools/bin/sign_update`, or `SPARKLE_SIGN_UPDATE` pointing to it.
-- GitHub CLI authentication with permission to create releases.
-- A clean git working tree.
-
-Create a signed, notarized, tagged GitHub release:
+Create and upload an App Store archive from Xcode with Product > Archive, then Distribute App > App Store Connect. From the command line, create an archive with:
 
 ```sh
-scripts/release.sh patch
+xcodebuild \
+  -project Browser.xcodeproj \
+  -scheme Browser \
+  -configuration Release \
+  -destination 'generic/platform=macOS' \
+  archive
 ```
 
-The argument can be `patch`, `minor`, `major`, or an explicit version like `1.3.0`.
+Non-App-Store distribution packaging is intentionally not part of this repo path.
 
 ## Backlog
 
