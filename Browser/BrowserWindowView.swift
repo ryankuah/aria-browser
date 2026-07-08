@@ -149,7 +149,7 @@ struct BrowserWindowView: View {
     }
 
     private var preferredColorScheme: ColorScheme? {
-        browser.profilePrefersDarkForeground ? .light : .dark
+        browser.accentPrefersDarkForeground ? .light : .dark
     }
 
     private var isSidebarVisible: Bool {
@@ -176,7 +176,7 @@ struct BrowserWindowView: View {
                     bezelStyle: browser.bezelStyle,
                     cornerRadius: shellCornerRadius,
                     effect: .liquidGlass(style: .clear),
-                    profileColor: browser.profileNSColor
+                    accentColor: browser.accentNSColor
                 )
                     .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
                     .allowsHitTesting(false)
@@ -315,7 +315,7 @@ struct BrowserWindowView: View {
                     BrowserConsolePanel(
                         messages: browser.consoleMessages,
                         bezelStyle: browser.bezelStyle,
-                        profileColor: browser.profileNSColor,
+                        accentColor: browser.accentNSColor,
                         onCopy: {
                             copyConsoleMessages(browser.consoleMessages)
                         },
@@ -340,7 +340,7 @@ struct BrowserWindowView: View {
                         browser: browser,
                         navigationRequest: findNavigationRequest,
                         bezelStyle: browser.bezelStyle,
-                        profileColor: browser.profileNSColor,
+                        accentColor: browser.accentNSColor,
                         onClose: {
                             closeFindPanel()
                         }
@@ -364,15 +364,13 @@ struct BrowserWindowView: View {
                     .zIndex(5)
 
                 if let zoomHUD = browser.zoomHUD {
-                    ZStack(alignment: .top) {
-                        BrowserZoomHUDView(
-                            hud: zoomHUD,
-                            bezelStyle: browser.bezelStyle,
-                            profileColor: browser.profileNSColor
-                        )
-                        .padding(.top, webOrigin.y + 12)
-                    }
-                    .frame(width: proxy.size.width, height: proxy.size.height)
+                    BrowserZoomHUDView(
+                        hud: zoomHUD,
+                        bezelStyle: browser.bezelStyle,
+                        accentColor: browser.accentNSColor
+                    )
+                    .frame(width: max(webSize.width - 24, 0), alignment: .topTrailing)
+                    .offset(x: webOrigin.x + 12, y: webOrigin.y + 12)
                     .allowsHitTesting(false)
                     .transition(.move(edge: .top).combined(with: .opacity))
                     .zIndex(8)
@@ -390,7 +388,7 @@ struct BrowserWindowView: View {
             .animation(.easeInOut(duration: 0.16), value: isFindPresented)
             .animation(.easeInOut(duration: 0.16), value: isConsolePresented)
             .animation(.easeInOut(duration: 0.16), value: browser.bezelStyle)
-            .animation(.easeInOut(duration: 0.16), value: browser.profileColorHex)
+            .animation(.easeInOut(duration: 0.16), value: browser.accentColorHex)
             .animation(.spring(response: 0.24, dampingFraction: 0.86), value: browser.toasts)
             .animation(.easeInOut(duration: 0.16), value: browser.zoomHUD)
         }
@@ -401,7 +399,7 @@ struct BrowserWindowView: View {
                 WindowAccessor.configureBrowserWindow(
                     window,
                     bezelStyle: browser.bezelStyle,
-                    profileColor: browser.profileNSColor
+                    accentColor: browser.accentNSColor
                 )
                 windowReference.update(window)
                 externalURLRegistrationID = externalURLRouter.register(

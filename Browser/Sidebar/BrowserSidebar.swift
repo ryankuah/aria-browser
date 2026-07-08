@@ -49,7 +49,7 @@ struct BrowserSidebar: View {
                     style: .regular,
                     tintColor: NSColor.black.withAlphaComponent(0.06)
                 ),
-                profileColor: browser.profileNSColor
+                accentColor: browser.accentNSColor
             )
             .allowsHitTesting(false)
         }

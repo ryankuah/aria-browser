@@ -62,7 +62,7 @@ struct NewTabPrompt: View {
             let paletteTopInset = max(72, (proxy.size.height * 0.42) - 27)
 
             ZStack(alignment: .top) {
-                Color(nsColor: browser.profileNSColor).opacity(0.24)
+                Color(nsColor: browser.accentNSColor).opacity(0.24)
                     .contentShape(Rectangle())
                     .onTapGesture(perform: onCancel)
 
@@ -105,7 +105,7 @@ struct NewTabPrompt: View {
                             style: .regular,
                             tintColor: NSColor.black.withAlphaComponent(0.12)
                         ),
-                        profileColor: browser.profileNSColor
+                        accentColor: browser.accentNSColor
                     )
                         .shadow(color: .black.opacity(0.22), radius: 14, y: 7)
                 }

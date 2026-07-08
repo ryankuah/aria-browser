@@ -10,7 +10,7 @@ struct BrowserFindPanel: View {
     @ObservedObject var browser: BrowserState
     let navigationRequest: BrowserFindNavigationRequest?
     let bezelStyle: BrowserBezelStyle
-    let profileColor: NSColor
+    let accentColor: NSColor
     let onClose: () -> Void
 
     @FocusState private var isFocused: Bool
@@ -60,7 +60,7 @@ struct BrowserFindPanel: View {
                     style: .regular,
                     tintColor: NSColor.black.withAlphaComponent(0.12)
                 ),
-                profileColor: profileColor
+                accentColor: accentColor
             )
         }
         .overlay {

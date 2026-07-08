@@ -4,7 +4,7 @@ import SwiftUI
 struct BrowserConsolePanel: View {
     let messages: [BrowserConsoleMessage]
     let bezelStyle: BrowserBezelStyle
-    let profileColor: NSColor
+    let accentColor: NSColor
     let onCopy: () -> Void
     let onClear: () -> Void
     let onClose: () -> Void
@@ -87,7 +87,7 @@ struct BrowserConsolePanel: View {
                     style: .regular,
                     tintColor: NSColor.black.withAlphaComponent(0.12)
                 ),
-                profileColor: profileColor
+                accentColor: accentColor
             )
                 .shadow(color: .black.opacity(0.22), radius: 24, y: 12)
         }

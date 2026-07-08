@@ -4,7 +4,7 @@ import SwiftUI
 struct BrowserSettingsPanel: View {
     @ObservedObject var browser: BrowserState
     let bezelStyle: BrowserBezelStyle
-    let profileColor: NSColor
+    let accentColor: NSColor
     let onOpenFullSettings: () -> Void
 
     var body: some View {
@@ -29,7 +29,7 @@ struct BrowserSettingsPanel: View {
                             .foregroundStyle(.secondary)
 
                         HStack(spacing: 6) {
-                            ForEach(BrowserBezelStyle.allCases, id: \.rawValue) { style in
+                            ForEach(BrowserBezelStyle.availableCases, id: \.rawValue) { style in
                                 SettingsSegmentButton(
                                     title: style.label,
                                     isSelected: browser.bezelStyle == style
@@ -102,7 +102,7 @@ struct BrowserSettingsPanel: View {
                     style: .regular,
                     tintColor: NSColor.black.withAlphaComponent(0.12)
                 ),
-                profileColor: profileColor
+                accentColor: accentColor
             )
         }
         .overlay {

@@ -10,7 +10,7 @@ struct BrowserToastStack: View {
                 BrowserToastView(
                     toast: toast,
                     bezelStyle: browser.bezelStyle,
-                    profileColor: browser.profileNSColor,
+                    accentColor: browser.accentNSColor,
                     onAllow: {
                         browser.allowMediaPermissionToast(id: toast.id)
                     },
@@ -43,7 +43,7 @@ struct BrowserToastStack: View {
 struct BrowserZoomHUDView: View {
     let hud: BrowserZoomHUD
     let bezelStyle: BrowserBezelStyle
-    let profileColor: NSColor
+    let accentColor: NSColor
 
     private let cornerRadius: CGFloat = 16
 
@@ -72,8 +72,8 @@ struct BrowserZoomHUDView: View {
                         style: .clear,
                         tintColor: NSColor.black.withAlphaComponent(0.18)
                     ),
-                    profileColor: profileColor,
-                    profileTintAlpha: 0.2
+                    accentColor: accentColor,
+                    accentTintAlpha: 0.2
                 )
             }
         }
@@ -89,7 +89,7 @@ struct BrowserZoomHUDView: View {
 private struct BrowserToastView: View {
     let toast: BrowserToast
     let bezelStyle: BrowserBezelStyle
-    let profileColor: NSColor
+    let accentColor: NSColor
     let onAllow: () -> Void
     let onDeny: () -> Void
     let onOpenDownload: () -> Void
@@ -162,8 +162,8 @@ private struct BrowserToastView: View {
                         style: .clear,
                         tintColor: NSColor.black.withAlphaComponent(0.18)
                     ),
-                    profileColor: profileColor,
-                    profileTintAlpha: 0.24
+                    accentColor: accentColor,
+                    accentTintAlpha: 0.24
                 )
             }
             .allowsHitTesting(false)

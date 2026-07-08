@@ -2,7 +2,6 @@ import Foundation
 
 struct BrowserStartupData: Sendable {
     var settings: [String: String] = [:]
-    var storageProfileID: UUID?
     var userScripts: [StoredBrowserUserScript] = []
     var mediaPermissionDecisions: [StoredMediaPermissionDecision] = []
     var bookmarks: [StoredBrowserBookmark] = []
@@ -19,7 +18,6 @@ actor BrowserPersistenceStore {
     func loadStartupData() -> BrowserStartupData {
         var data = BrowserStartupData()
         data.settings = load(default: [:]) { try $0.loadSettings() }
-        data.storageProfileID = load(default: UUID?.none) { try $0.ensureLocalProfile() }
         data.userScripts = load(default: []) { try $0.loadUserScripts() }
         data.mediaPermissionDecisions = load(default: []) { try $0.loadMediaPermissionDecisions() }
         data.autocompleteSites = load(default: []) { try $0.loadAutocompleteSites(limit: 500) }
@@ -27,16 +25,14 @@ actor BrowserPersistenceStore {
         data.downloads = load(default: []) { database in
             try Self.interruptActiveDownloads(database.loadRecentDownloads(limit: 50), database: database)
         }
-        if let storageProfileID = data.storageProfileID {
-            data.bookmarks = load(default: []) { try $0.loadBookmarks(profileID: storageProfileID) }
-            data.session = load(default: StoredBrowserSession?.none) { try $0.loadSession(profileID: storageProfileID) }
-        }
+        data.bookmarks = load(default: []) { try $0.loadBookmarks() }
+        data.session = load(default: StoredBrowserSession?.none) { try $0.loadSession() }
         return data
     }
 
-    func saveSession(profileID: UUID, tabs: [BrowserTabSnapshot], selectedTabID: UUID?) {
+    func saveSession(tabs: [BrowserTabSnapshot], selectedTabID: UUID?) {
         save("Browser session save failed") {
-            try $0.saveSession(profileID: profileID, tabs: tabs, selectedTabID: selectedTabID)
+            try $0.saveSession(tabs: tabs, selectedTabID: selectedTabID)
         }
     }
 
@@ -73,17 +69,17 @@ actor BrowserPersistenceStore {
         }
     }
 
-    func saveBookmark(_ bookmark: StoredBrowserBookmark, profileID: UUID) {
+    func saveBookmark(_ bookmark: StoredBrowserBookmark) {
         save("Browser bookmark save failed") {
-            try $0.saveBookmark(bookmark, profileID: profileID)
+            try $0.saveBookmark(bookmark)
         }
     }
 
-    func deleteBookmarkAndReindex(id: UUID, profileID: UUID, remainingBookmarks: [StoredBrowserBookmark]) {
+    func deleteBookmarkAndReindex(id: UUID, remainingBookmarks: [StoredBrowserBookmark]) {
         save("Browser bookmark delete failed") { database in
             try database.deleteBookmark(id: id)
             for bookmark in remainingBookmarks {
-                try database.saveBookmark(bookmark, profileID: profileID)
+                try database.saveBookmark(bookmark)
             }
         }
     }

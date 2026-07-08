@@ -18,7 +18,7 @@ struct DownloadsFooter: View {
                 DownloadsPanel(
                     browser: browser,
                     bezelStyle: browser.bezelStyle,
-                    profileColor: browser.profileNSColor
+                    accentColor: browser.accentNSColor
                 )
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
@@ -27,7 +27,7 @@ struct DownloadsFooter: View {
                 BrowserSettingsPanel(
                     browser: browser,
                     bezelStyle: browser.bezelStyle,
-                    profileColor: browser.profileNSColor,
+                    accentColor: browser.accentNSColor,
                     onOpenFullSettings: onOpenFullSettings
                 )
                     .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -117,7 +117,7 @@ private struct DownloadsIconButton: View {
 private struct DownloadsPanel: View {
     @ObservedObject var browser: BrowserState
     let bezelStyle: BrowserBezelStyle
-    let profileColor: NSColor
+    let accentColor: NSColor
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -180,7 +180,7 @@ private struct DownloadsPanel: View {
                     style: .regular,
                     tintColor: NSColor.black.withAlphaComponent(0.12)
                 ),
-                profileColor: profileColor
+                accentColor: accentColor
             )
         }
         .overlay {

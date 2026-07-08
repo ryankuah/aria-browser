@@ -86,7 +86,7 @@ struct BrowserHistoryPage: View {
                     style: .regular,
                     tintColor: NSColor.black.withAlphaComponent(0.16)
                 ),
-                profileColor: browser.profileNSColor
+                accentColor: browser.accentNSColor
             )
             .ignoresSafeArea()
 

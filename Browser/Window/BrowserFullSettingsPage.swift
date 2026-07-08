@@ -21,7 +21,7 @@ struct BrowserFullSettingsPage: View {
                     style: .regular,
                     tintColor: NSColor.black.withAlphaComponent(0.16)
                 ),
-                profileColor: browser.profileNSColor
+                accentColor: browser.accentNSColor
             )
             .ignoresSafeArea()
 
@@ -128,7 +128,7 @@ struct BrowserFullSettingsPage: View {
         SettingsCard(title: "Appearance", systemName: "paintpalette") {
             SettingsField(label: "Bezel Style") {
                 SettingsSegmentedControl {
-                    ForEach(BrowserBezelStyle.allCases, id: \.rawValue) { style in
+                    ForEach(BrowserBezelStyle.availableCases, id: \.rawValue) { style in
                         SettingsSegmentButton(
                             title: style.label,
                             isSelected: browser.bezelStyle == style

@@ -26,7 +26,7 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         }
     }
     @Published private(set) var hasLoadedStartupData = false
-    @Published private(set) var bezelStyle: BrowserBezelStyle = .liquidGlass
+    @Published private(set) var bezelStyle: BrowserBezelStyle = .defaultStyle
     @Published private(set) var searchEngine: BrowserSearchEngine = .google
     @Published private(set) var userScripts: [BrowserUserScript] = []
     @Published private var mountRequestedTabIDs: Set<BrowserTab.ID> = []
@@ -54,26 +54,25 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
     private var historyURLByTabID: [BrowserTab.ID: String] = [:]
     private var historyRecordTasksByTabID: [BrowserTab.ID: Task<Void, Never>] = [:]
     private var historyCursorSourceByTabID: [BrowserTab.ID: BrowserTab.ID] = [:]
-    private var storageProfileID: UUID?
 
     var activeTab: BrowserTab? {
         tabs.first { $0.id == selectedTabID }
     }
 
-    var profileColorHex: String {
+    var accentColorHex: String {
         BrowserAppearance.accentColorHex
     }
 
-    var profileNSColor: NSColor {
-        NSColor(hexString: profileColorHex) ?? NSColor.systemBlue
+    var accentNSColor: NSColor {
+        NSColor(hexString: accentColorHex) ?? NSColor.black
     }
 
-    var profileColor: Color {
-        Color(nsColor: profileNSColor)
+    var accentColor: Color {
+        Color(nsColor: accentNSColor)
     }
 
-    var profilePrefersDarkForeground: Bool {
-        profileNSColor.prefersDarkForeground
+    var accentPrefersDarkForeground: Bool {
+        accentNSColor.prefersDarkForeground
     }
 
     var visibleTabs: [BrowserTab] {
@@ -650,13 +649,14 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
     }
 
     func setBezelStyle(_ style: BrowserBezelStyle) {
-        guard bezelStyle != style else {
+        let resolvedStyle = style.resolvedForCurrentOS
+        guard bezelStyle != resolvedStyle else {
             return
         }
 
-        bezelStyle = style
+        bezelStyle = resolvedStyle
         Task { [persistence] in
-            await persistence.saveSetting(key: "bezelStyle", value: style.rawValue)
+            await persistence.saveSetting(key: "bezelStyle", value: resolvedStyle.rawValue)
         }
     }
 
@@ -1018,17 +1018,12 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         isApplyingStoredState = true
 
         applySettings(startupData.settings)
-        storageProfileID = startupData.storageProfileID
         applyUserScripts(startupData.userScripts)
         applyMediaPermissionDecisions(startupData.mediaPermissionDecisions)
         downloads = startupData.downloads
         applyAutocompleteSites(startupData.autocompleteSites)
         applyAutocompletePages(startupData.autocompletePages)
-        if storageProfileID != nil {
-            applyStoredBrowserState(bookmarks: startupData.bookmarks, session: startupData.session)
-        } else {
-            resetStoredBrowserState()
-        }
+        applyStoredBrowserState(bookmarks: startupData.bookmarks, session: startupData.session)
 
         isApplyingStoredState = false
         hasLoadedStartupData = true
@@ -1054,7 +1049,7 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
     private func applySettings(_ settings: [String: String]) {
         if let rawBezelStyle = settings["bezelStyle"],
            let storedBezelStyle = BrowserBezelStyle(rawValue: rawBezelStyle) {
-            bezelStyle = storedBezelStyle
+            bezelStyle = storedBezelStyle.resolvedForCurrentOS
         }
 
         if let rawSearchEngine = settings["searchEngine"],
@@ -1937,7 +1932,7 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
     }
 
     private func persistSession() {
-        guard !isApplyingStoredState, let storageProfileID else {
+        guard !isApplyingStoredState else {
             return
         }
 
@@ -1950,7 +1945,6 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
                 return
             }
             await persistence.saveSession(
-                profileID: storageProfileID,
                 tabs: snapshot.tabs,
                 selectedTabID: snapshot.selectedTabID
             )
@@ -1958,14 +1952,9 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
     }
 
     private func persistSessionImmediately() {
-        guard let storageProfileID else {
-            return
-        }
-
         let snapshot = sessionSnapshot()
         Task { [persistence] in
             await persistence.saveSession(
-                profileID: storageProfileID,
                 tabs: snapshot.tabs,
                 selectedTabID: snapshot.selectedTabID
             )
@@ -2010,10 +1999,6 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
     }
 
     private func persistBookmark(_ bookmark: BrowserBookmark, position: Int) {
-        guard let storageProfileID else {
-            return
-        }
-
         let storedBookmark = StoredBrowserBookmark(
             id: bookmark.id,
             position: position,
@@ -2021,15 +2006,11 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
             url: bookmark.url
         )
         Task { [persistence] in
-            await persistence.saveBookmark(storedBookmark, profileID: storageProfileID)
+            await persistence.saveBookmark(storedBookmark)
         }
     }
 
     private func removeBookmark(id: BrowserBookmark.ID) {
-        guard let storageProfileID else {
-            return
-        }
-
         bookmarkFaviconTasks[id]?.cancel()
         bookmarkFaviconTasks.removeValue(forKey: id)
         bookmarks.removeAll { $0.id == id }
@@ -2045,7 +2026,6 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         Task { [persistence] in
             await persistence.deleteBookmarkAndReindex(
                 id: id,
-                profileID: storageProfileID,
                 remainingBookmarks: remainingBookmarks
             )
         }

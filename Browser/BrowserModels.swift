@@ -227,7 +227,7 @@ struct BrowserBookmark: Identifiable, Equatable {
 }
 
 enum BrowserAppearance {
-    static let accentColorHex = "#2F80ED"
+    static let accentColorHex = "#000000"
 }
 
 struct BrowserHistoryEntry: Identifiable, Equatable {
@@ -375,6 +375,35 @@ enum BrowserMediaDeviceKind: String, CaseIterable, Hashable {
 enum BrowserBezelStyle: String, CaseIterable, Equatable {
     case liquidGlass
     case simple
+
+    static var defaultStyle: BrowserBezelStyle {
+        if #available(macOS 26.0, *) {
+            return .liquidGlass
+        }
+
+        return .simple
+    }
+
+    static var availableCases: [BrowserBezelStyle] {
+        allCases.filter(\.isAvailable)
+    }
+
+    var isAvailable: Bool {
+        switch self {
+        case .liquidGlass:
+            if #available(macOS 26.0, *) {
+                return true
+            }
+
+            return false
+        case .simple:
+            return true
+        }
+    }
+
+    var resolvedForCurrentOS: BrowserBezelStyle {
+        isAvailable ? self : .simple
+    }
 
     var label: String {
         switch self {

@@ -19,13 +19,6 @@ struct BrowserTabSnapshot: Sendable {
     let url: URL?
 }
 
-struct StoredBrowserProfile: Sendable {
-    let id: UUID
-    let name: String
-    let colorHex: String
-    let position: Int
-}
-
 struct StoredBrowserBookmark: Sendable {
     let id: UUID
     let position: Int
