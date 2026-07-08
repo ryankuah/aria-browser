@@ -1434,13 +1434,16 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
     }
 
     private func restoreSession(_ session: StoredBrowserSession?) {
-        guard let session, !session.tabs.isEmpty else {
+        guard let session, !session.tabs.isEmpty || session.selectedTabID != nil else {
             tabs = []
             selectedTabID = nil
             _ = createTab(url: nil, persist: false)
             return
         }
 
+        let selectedBookmarkID = session.selectedTabID.flatMap { selectedID in
+            bookmarks.contains { $0.id == selectedID } ? selectedID : nil
+        }
         let restoredTabs = session.tabs
             .sorted { $0.position < $1.position }
             .map { storedTab in
@@ -1458,6 +1461,11 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
             }
 
         tabs = restoredTabs
+        if let selectedBookmarkID {
+            openBookmark(id: selectedBookmarkID)
+            return
+        }
+
         selectedTabID = restoredTabs.contains { $0.id == session.selectedTabID } ? session.selectedTabID : restoredTabs.first?.id
         if tabs.isEmpty {
             _ = createTab(url: nil, persist: false)
@@ -2331,11 +2339,13 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
     }
 
     private func tabNavigationDidFinish(_ tab: BrowserTab) {
+        syncBookmark(for: tab)
         persistSession()
         refreshHistoryMetadataIfNeeded()
     }
 
     private func tabURLDidChange(_ tab: BrowserTab, url: URL) {
+        syncBookmark(for: tab)
         persistSession()
 
         let urlString = url.absoluteString
@@ -2491,8 +2501,12 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
     }
 
     private func sessionSnapshot() -> (tabs: [BrowserTabSnapshot], selectedTabID: UUID?) {
-        let sessionTabs = tabs
-        let persistedSelectedTabID = sessionTabs.contains { $0.id == selectedTabID } ? selectedTabID : sessionTabs.first?.id
+        syncOpenBookmarkTabs()
+
+        let selectedBookmarkID = selectedTabID.flatMap(bookmarkID(owning:))
+        let sessionTabs = tabs.filter { bookmarkID(owning: $0.id) == nil }
+        let persistedSelectedTabID = selectedBookmarkID
+            ?? (sessionTabs.contains { $0.id == selectedTabID } ? selectedTabID : sessionTabs.first?.id)
         let snapshots = sessionTabs.enumerated().map { index, tab in
             BrowserTabSnapshot(
                 id: tab.id,
@@ -2506,6 +2520,8 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
     }
 
     private func tabFaviconDidLoad(_ tab: BrowserTab, favicon: NSImage) {
+        syncBookmark(for: tab)
+
         guard let pageURL = tab.url,
               let origin = BrowserNavigation.originKey(for: pageURL),
               let imageData = favicon.tiffRepresentation else {
@@ -2537,6 +2553,58 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         Task { [persistence] in
             await persistence.saveBookmark(storedBookmark)
         }
+    }
+
+    private func syncOpenBookmarkTabs() {
+        tabs.forEach { syncBookmark(for: $0) }
+    }
+
+    @discardableResult
+    private func syncBookmark(for tab: BrowserTab) -> BrowserBookmark.ID? {
+        guard let bookmarkIndex = bookmarks.firstIndex(where: { $0.tabID == tab.id }) else {
+            return nil
+        }
+
+        guard let url = tab.webView.url ?? tab.url,
+              BrowserNavigation.isAllowedNavigationURL(url) else {
+            return bookmarks[bookmarkIndex].id
+        }
+
+        var bookmark = bookmarks[bookmarkIndex]
+        var didUpdateBookmark = false
+        var shouldPersistBookmark = false
+
+        let didChangeURL = bookmark.url != url
+        if didChangeURL {
+            bookmark.url = url
+            bookmark.favicon = tab.favicon
+            bookmarkFaviconTasks[bookmark.id]?.cancel()
+            bookmarkFaviconTasks.removeValue(forKey: bookmark.id)
+            didUpdateBookmark = true
+            shouldPersistBookmark = true
+        }
+
+        let title = tab.displayTitle
+        if bookmark.title != title, didChangeURL || tab.webView.url != nil {
+            bookmark.title = title
+            didUpdateBookmark = true
+            shouldPersistBookmark = true
+        }
+
+        if let favicon = tab.favicon, bookmark.favicon !== favicon {
+            bookmark.favicon = favicon
+            didUpdateBookmark = true
+        }
+
+        if didUpdateBookmark {
+            bookmarks[bookmarkIndex] = bookmark
+        }
+
+        if shouldPersistBookmark {
+            persistBookmark(bookmark, position: bookmarkIndex)
+        }
+
+        return bookmark.id
     }
 
     private func removeBookmark(id: BrowserBookmark.ID) {
