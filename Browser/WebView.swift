@@ -329,6 +329,7 @@ final class BrowserWebView: WKWebView {
     static func configure(
         _ configuration: WKWebViewConfiguration,
         consoleMessageHandler: WKScriptMessageHandler? = nil,
+        autofillMessageHandler: WKScriptMessageHandler? = nil,
         userScripts: [BrowserUserScript] = []
     ) {
         configuration.applicationNameForUserAgent = Self.safariUserAgentSuffix
@@ -342,9 +343,13 @@ final class BrowserWebView: WKWebView {
         if let consoleMessageHandler {
             userContentController.add(consoleMessageHandler, name: "browserConsole")
         }
+        if let autofillMessageHandler {
+            userContentController.add(autofillMessageHandler, contentWorld: .defaultClient, name: "browserAutofill")
+        }
         installConfiguredUserScripts(
             on: userContentController,
             includeConsoleBridge: consoleMessageHandler != nil,
+            includeAutofillBridge: autofillMessageHandler != nil,
             userScripts: userScripts
         )
     }
@@ -352,12 +357,14 @@ final class BrowserWebView: WKWebView {
     static func replaceConfiguredUserScripts(
         on userContentController: WKUserContentController,
         includeConsoleBridge: Bool,
+        includeAutofillBridge: Bool,
         userScripts: [BrowserUserScript]
     ) {
         userContentController.removeAllUserScripts()
         installConfiguredUserScripts(
             on: userContentController,
             includeConsoleBridge: includeConsoleBridge,
+            includeAutofillBridge: includeAutofillBridge,
             userScripts: userScripts
         )
     }
@@ -516,6 +523,7 @@ final class BrowserWebView: WKWebView {
     private static func installConfiguredUserScripts(
         on userContentController: WKUserContentController,
         includeConsoleBridge: Bool,
+        includeAutofillBridge: Bool,
         userScripts: [BrowserUserScript]
     ) {
         if includeConsoleBridge {
@@ -523,6 +531,15 @@ final class BrowserWebView: WKWebView {
                 source: consoleBridgeScript,
                 injectionTime: .atDocumentStart,
                 forMainFrameOnly: false
+            ))
+        }
+
+        if includeAutofillBridge {
+            userContentController.addUserScript(WKUserScript(
+                source: autofillBridgeScript,
+                injectionTime: .atDocumentEnd,
+                forMainFrameOnly: false,
+                in: .defaultClient
             ))
         }
 
@@ -686,6 +703,215 @@ final class BrowserWebView: WKWebView {
     })();
     """#
 
+    private static let autofillBridgeScript = #"""
+    (() => {
+      if (window.__browserAutofillBridgeInstalled) return;
+      window.__browserAutofillBridgeInstalled = true;
+
+      const autofillAttribute = "data-browser-autofill-id";
+      const reportedForms = new Map();
+      let scanTimer = null;
+
+      const post = payload => {
+        try {
+          window.webkit.messageHandlers.browserAutofill.postMessage({
+            ...payload,
+            origin: String(location.origin),
+            href: String(location.href)
+          });
+        } catch (_) {}
+      };
+
+      const normalized = value => String(value || "").toLowerCase();
+      const fieldSignature = field => normalized([
+        field.name,
+        field.id,
+        field.autocomplete,
+        field.placeholder,
+        field.getAttribute("aria-label")
+      ].filter(Boolean).join(" "));
+
+      const isVisible = element => {
+        if (!(element instanceof HTMLElement)) return false;
+        if (element.disabled || element.readOnly || element.type === "hidden") return false;
+        const style = window.getComputedStyle(element);
+        if (style.visibility === "hidden" || style.display === "none") return false;
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+
+      const isIgnoredPassword = field => {
+        const signature = fieldSignature(field);
+        return /\b(one-time-code|otp|2fa|mfa|verification|verify|code|pin)\b/.test(signature) ||
+          /\b(new-password|new password|confirm|confirmation|repeat|reset)\b/.test(signature);
+      };
+
+      const isPasswordField = field => {
+        return field instanceof HTMLInputElement &&
+          normalized(field.type) === "password" &&
+          isVisible(field) &&
+          !isIgnoredPassword(field);
+      };
+
+      const isUsernameCandidate = field => {
+        if (!(field instanceof HTMLInputElement)) return false;
+        const type = normalized(field.type || "text");
+        if (!["text", "email", "search", "tel", "url", ""].includes(type)) return false;
+        if (!isVisible(field)) return false;
+        const signature = fieldSignature(field);
+        return !/\b(one-time-code|otp|2fa|mfa|verification|verify|code|pin|captcha|search)\b/.test(signature);
+      };
+
+      const usernameScore = field => {
+        const signature = fieldSignature(field);
+        let score = 0;
+        if (normalized(field.type) === "email") score += 20;
+        if (/\b(email|e-mail|username|user name|login|account|identifier)\b/.test(signature)) score += 16;
+        if (/\b(user|mail)\b/.test(signature)) score += 8;
+        if (field.autocomplete && /username|email/.test(normalized(field.autocomplete))) score += 12;
+        return score;
+      };
+
+      const ownerFor = passwordField => {
+        return passwordField.form ||
+          passwordField.closest("form,[role='form'],[data-testid*='login' i],[class*='login' i],[class*='signin' i],[class*='sign-in' i]") ||
+          passwordField.closest("section,main,article,div") ||
+          document.body;
+      };
+
+      const controlsIn = owner => {
+        return Array.from(owner.querySelectorAll("input")).filter(field => field instanceof HTMLInputElement);
+      };
+
+      const fieldName = field => {
+        return field.name || field.id || field.autocomplete || field.getAttribute("aria-label") || "";
+      };
+
+      const ensureFormID = owner => {
+        let id = owner.getAttribute(autofillAttribute);
+        if (!id) {
+          id = (crypto && crypto.randomUUID) ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+          owner.setAttribute(autofillAttribute, id);
+        }
+        return id;
+      };
+
+      const detectOwner = owner => {
+        if (!(owner instanceof Element)) return null;
+        const controls = controlsIn(owner);
+        const passwordFields = controls.filter(isPasswordField);
+        if (passwordFields.length !== 1) return null;
+
+        const passwordField = passwordFields[0];
+        const usernameCandidates = controls
+          .filter(isUsernameCandidate)
+          .filter(field => field.compareDocumentPosition(passwordField) & Node.DOCUMENT_POSITION_FOLLOWING);
+
+        if (usernameCandidates.length === 0) return null;
+
+        usernameCandidates.sort((left, right) => usernameScore(right) - usernameScore(left));
+        const usernameField = usernameCandidates[0];
+        return {
+          owner,
+          formID: ensureFormID(owner),
+          usernameField,
+          passwordField,
+          usernameFieldName: fieldName(usernameField),
+          passwordFieldName: fieldName(passwordField)
+        };
+      };
+
+      const detectFromPasswordField = passwordField => detectOwner(ownerFor(passwordField));
+
+      const reportDetected = detected => {
+        const signature = `${detected.usernameFieldName}|${detected.passwordFieldName}`;
+        if (reportedForms.get(detected.formID) === signature) return;
+        reportedForms.set(detected.formID, signature);
+        post({
+          type: "formDetected",
+          formID: detected.formID,
+          usernameFieldName: detected.usernameFieldName,
+          passwordFieldName: detected.passwordFieldName
+        });
+      };
+
+      const scan = () => {
+        scanTimer = null;
+        const seen = new Set();
+        for (const passwordField of Array.from(document.querySelectorAll("input[type='password']"))) {
+          const detected = detectFromPasswordField(passwordField);
+          if (!detected || seen.has(detected.formID)) continue;
+          seen.add(detected.formID);
+          reportDetected(detected);
+        }
+      };
+
+      const scheduleScan = () => {
+        if (scanTimer !== null) return;
+        scanTimer = window.setTimeout(scan, 150);
+      };
+
+      const setValue = (field, value) => {
+        const prototype = Object.getPrototypeOf(field);
+        const descriptor = Object.getOwnPropertyDescriptor(prototype, "value");
+        if (descriptor && descriptor.set) {
+          descriptor.set.call(field, value);
+        } else {
+          field.value = value;
+        }
+        try {
+          field.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertReplacementText" }));
+        } catch (_) {
+          field.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+        field.dispatchEvent(new Event("change", { bubbles: true }));
+      };
+
+      window.__browserAutofillFill = payload => {
+        if (!payload || typeof payload.formID !== "string") return false;
+        const owner = Array.from(document.querySelectorAll(`[${autofillAttribute}]`))
+          .find(element => element.getAttribute(autofillAttribute) === payload.formID);
+        const detected = owner ? detectOwner(owner) : null;
+        if (!detected) return false;
+
+        setValue(detected.usernameField, String(payload.username || ""));
+        setValue(detected.passwordField, String(payload.password || ""));
+        return true;
+      };
+
+      document.addEventListener("submit", event => {
+        const form = event.target instanceof HTMLFormElement ? event.target : null;
+        if (!form) return;
+        const detected = detectOwner(form);
+        if (!detected) return;
+
+        const username = String(detected.usernameField.value || "").trim();
+        const password = String(detected.passwordField.value || "");
+        if (!username || !password) return;
+
+        post({
+          type: "credentialsSubmitted",
+          formID: detected.formID,
+          username,
+          password,
+          usernameFieldName: detected.usernameFieldName,
+          passwordFieldName: detected.passwordFieldName
+        });
+      }, true);
+
+      document.addEventListener("focusin", scheduleScan, true);
+      window.addEventListener("load", scheduleScan, { once: true });
+      if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", scheduleScan, { once: true });
+      } else {
+        scheduleScan();
+      }
+
+      const observer = new MutationObserver(scheduleScan);
+      observer.observe(document.documentElement, { childList: true, subtree: true });
+    })();
+    """#
+
 }
 
 final class BrowserConsoleScriptMessageHandler: NSObject, WKScriptMessageHandler {
@@ -698,6 +924,24 @@ final class BrowserConsoleScriptMessageHandler: NSObject, WKScriptMessageHandler
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         Task { @MainActor [weak browser] in
             browser?.receiveConsoleMessage(message.body)
+        }
+    }
+}
+
+final class BrowserAutofillScriptMessageHandler: NSObject, WKScriptMessageHandler {
+    weak var browser: BrowserState?
+
+    init(browser: BrowserState) {
+        self.browser = browser
+    }
+
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        Task { @MainActor [weak browser] in
+            browser?.receiveAutofillMessage(
+                message.body,
+                webView: message.webView as? BrowserWebView,
+                frameInfo: message.frameInfo
+            )
         }
     }
 }

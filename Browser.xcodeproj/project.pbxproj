@@ -36,6 +36,7 @@
 		2B1FB70B800B31C2F9CB75F1 /* SidebarDownloads.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B8D7C7274715BA4EE69367E /* SidebarDownloads.swift */; };
 		2B795F1BCB909690586D9003 /* SidebarSettingsPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B2A659A9E9BF3030C48FE16 /* SidebarSettingsPanel.swift */; };
 		2B5F3A46D9D4566D774EE769 /* SidebarTabs.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B3DFD1E008817D1100A5650 /* SidebarTabs.swift */; };
+		2BC200012D22000100000001 /* BrowserCredentialKeychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2BC200002D22000100000001 /* BrowserCredentialKeychain.swift */; };
 		2BDCF270B83A14E422BE8B72 /* BrowserStorageModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B82629A612B3E12E1731A81 /* BrowserStorageModels.swift */; };
 		2BB103B19E83796381BD27EE /* SQLiteSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B8222F79C78DBED7751697F /* SQLiteSupport.swift */; };
 		2BC1000D2D1B000100000001 /* BrowserExternalURLRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2BC1000C2D1B000100000001 /* BrowserExternalURLRouter.swift */; };
@@ -75,6 +76,7 @@
 		2B2A659A9E9BF3030C48FE16 /* SidebarSettingsPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarSettingsPanel.swift; sourceTree = "<group>"; };
 		2B3DFD1E008817D1100A5650 /* SidebarTabs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarTabs.swift; sourceTree = "<group>"; };
 		2B82629A612B3E12E1731A81 /* BrowserStorageModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserStorageModels.swift; sourceTree = "<group>"; };
+		2BC200002D22000100000001 /* BrowserCredentialKeychain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserCredentialKeychain.swift; sourceTree = "<group>"; };
 		2B8222F79C78DBED7751697F /* SQLiteSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SQLiteSupport.swift; sourceTree = "<group>"; };
 		2BC1000C2D1B000100000001 /* BrowserExternalURLRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserExternalURLRouter.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -162,11 +164,12 @@
 		};
 			2B336D812C3D4C8500B63C2B /* Persistence */ = {
 				isa = PBXGroup;
-				children = (
-					2B336D7F2C3D4C8500B63C2B /* BrowserDatabase.swift */,
-					2B336D8C2C3D4C8700B63C2B /* BrowserPersistenceStore.swift */,
-					2B82629A612B3E12E1731A81 /* BrowserStorageModels.swift */,
-					2B8222F79C78DBED7751697F /* SQLiteSupport.swift */,
+					children = (
+						2B336D7F2C3D4C8500B63C2B /* BrowserDatabase.swift */,
+						2BC200002D22000100000001 /* BrowserCredentialKeychain.swift */,
+						2B336D8C2C3D4C8700B63C2B /* BrowserPersistenceStore.swift */,
+						2B82629A612B3E12E1731A81 /* BrowserStorageModels.swift */,
+						2B8222F79C78DBED7751697F /* SQLiteSupport.swift */,
 				);
 				path = Persistence;
 				sourceTree = "<group>";
@@ -270,12 +273,13 @@
 					2B3F3B42C22F6B2F7D287ECA /* NewTabPrompt.swift in Sources */,
 					2B3C191DD49D5F81F8FA7BC5 /* SidebarAddressField.swift in Sources */,
 					2B389713B95445A92A83E7E5 /* SidebarBookmarks.swift in Sources */,
-					2B1FB70B800B31C2F9CB75F1 /* SidebarDownloads.swift in Sources */,
-					2B795F1BCB909690586D9003 /* SidebarSettingsPanel.swift in Sources */,
-					2B5F3A46D9D4566D774EE769 /* SidebarTabs.swift in Sources */,
-					2BDCF270B83A14E422BE8B72 /* BrowserStorageModels.swift in Sources */,
-					2BB103B19E83796381BD27EE /* SQLiteSupport.swift in Sources */,
-			);
+						2B1FB70B800B31C2F9CB75F1 /* SidebarDownloads.swift in Sources */,
+						2B795F1BCB909690586D9003 /* SidebarSettingsPanel.swift in Sources */,
+						2B5F3A46D9D4566D774EE769 /* SidebarTabs.swift in Sources */,
+						2BC200012D22000100000001 /* BrowserCredentialKeychain.swift in Sources */,
+						2BDCF270B83A14E422BE8B72 /* BrowserStorageModels.swift in Sources */,
+						2BB103B19E83796381BD27EE /* SQLiteSupport.swift in Sources */,
+				);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */

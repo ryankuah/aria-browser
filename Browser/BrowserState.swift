@@ -8,6 +8,8 @@ import WebKit
 final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDelegate {
     private static let consoleMessageLimit = 500
     private static let recentlyClosedTabLimit = 20
+    private static let passwordAutofillSettingKey = "passwordAutofillEnabled"
+    private static let passwordSavePromptSettingKey = "passwordSavePromptEnabled"
 
     @Published private(set) var tabs: [BrowserTab] = []
     @Published private(set) var bookmarks: [BrowserBookmark] = []
@@ -19,6 +21,7 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
     @Published private(set) var downloads: [BrowserDownload] = []
     @Published private(set) var consoleMessages: [BrowserConsoleMessage] = []
     @Published private(set) var toasts: [BrowserToast] = []
+    @Published private(set) var loginCredentials: [StoredLoginCredential] = []
     @Published private(set) var zoomHUD: BrowserZoomHUD?
     @Published var selectedTabID: BrowserTab.ID? {
         didSet {
@@ -28,6 +31,8 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
     @Published private(set) var hasLoadedStartupData = false
     @Published private(set) var bezelStyle: BrowserBezelStyle = .defaultStyle
     @Published private(set) var searchEngine: BrowserSearchEngine = .google
+    @Published private(set) var isPasswordAutofillEnabled = true
+    @Published private(set) var isPasswordSavePromptEnabled = true
     @Published private(set) var userScripts: [BrowserUserScript] = []
     @Published private var mountRequestedTabIDs: Set<BrowserTab.ID> = []
     @Published private var tabStateRevision = 0
@@ -46,6 +51,10 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
     private var downloadIDsByDownload: [ObjectIdentifier: BrowserDownload.ID] = [:]
     private var toastIDsByDownloadID: [BrowserDownload.ID: BrowserToast.ID] = [:]
     private var mediaPermissionRequests: [BrowserToast.ID: BrowserMediaPermissionRequest] = [:]
+    private var externalApplicationPromptURLs: Set<String> = []
+    private var credentialSaveRequests: [BrowserToast.ID: BrowserCredentialSaveRequest] = [:]
+    private var promptedAutofillFormKeys: Set<String> = []
+    private var filledAutofillFormKeys: Set<String> = []
     private var toastDismissalTasks: [BrowserToast.ID: Task<Void, Never>] = [:]
     private var zoomHUDDismissalTask: Task<Void, Never>?
     private var recentlyClosedTabs: [RecentlyClosedTab] = []
@@ -77,6 +86,22 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
 
     var visibleTabs: [BrowserTab] {
         tabs.filter { bookmarkID(owning: $0.id) == nil }
+    }
+
+    var sortedLoginCredentials: [StoredLoginCredential] {
+        loginCredentials.sorted { left, right in
+            let leftHost = left.displayHost.localizedCaseInsensitiveCompare(right.displayHost)
+            if leftHost != .orderedSame {
+                return leftHost == .orderedAscending
+            }
+
+            let leftUsername = left.displayUsername.localizedCaseInsensitiveCompare(right.displayUsername)
+            if leftUsername != .orderedSame {
+                return leftUsername == .orderedAscending
+            }
+
+            return left.updatedAt > right.updatedAt
+        }
     }
 
     var activeMediaPermissionSnapshot: BrowserMediaPermissionSnapshot {
@@ -147,11 +172,44 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         newTab(url: url)
     }
 
+    private func promptToOpenExternalApplication(_ url: URL, from tab: BrowserTab, sourceURL: URL?) {
+        let promptURLString = url.absoluteString
+        guard !externalApplicationPromptURLs.contains(promptURLString),
+              let applicationURL = NSWorkspace.shared.urlForApplication(toOpen: url) else {
+            return
+        }
+
+        externalApplicationPromptURLs.insert(promptURLString)
+
+        let applicationName = Self.applicationDisplayName(at: applicationURL)
+        let sourceDescription = Self.externalApplicationSourceDescription(for: sourceURL ?? tab.webView.url ?? tab.url)
+        let schemeDescription = url.scheme?.lowercased() ?? "external"
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.icon = NSWorkspace.shared.icon(forFile: applicationURL.path)
+        alert.messageText = "Open \(applicationName)?"
+        alert.informativeText = "\(sourceDescription) wants to open a \(schemeDescription) link in \(applicationName)."
+        alert.addButton(withTitle: "Open")
+        alert.addButton(withTitle: "Cancel")
+
+        runAlert(alert, attachedTo: tab.webView.window) { [weak self] response in
+            self?.externalApplicationPromptURLs.remove(promptURLString)
+
+            guard response == .alertFirstButtonReturn else {
+                return
+            }
+
+            NSWorkspace.shared.open(url)
+        }
+    }
+
     @discardableResult
     private func createTab(url: URL?, persist: Bool) -> BrowserTab {
+        let sourceTabID = selectedTabID
         let tab = makeTab(url: url)
         historyCursorByTabID[tab.id] = BrowserHistoryCursor(journeyID: UUID())
-        tabs.append(tab)
+        insertTab(tab, after: sourceTabID)
         selectedTabID = tab.id
 
         if persist {
@@ -501,6 +559,28 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         )
     }
 
+    func receiveAutofillMessage(_ body: Any, webView: BrowserWebView?, frameInfo: WKFrameInfo) {
+        guard let webView,
+              let payload = body as? [String: Any],
+              let messageType = payload["type"] as? String,
+              let frameOrigin = Self.credentialOriginParts(for: frameInfo.request.url),
+              let rawPayloadOrigin = payload["origin"] as? String,
+              let payloadOriginURL = URL(string: rawPayloadOrigin),
+              let payloadOrigin = Self.credentialOriginParts(for: payloadOriginURL),
+              payloadOrigin.origin == frameOrigin.origin else {
+            return
+        }
+
+        switch messageType {
+        case "formDetected":
+            handleAutofillFormDetected(payload, webView: webView, frameInfo: frameInfo, origin: frameOrigin)
+        case "credentialsSubmitted":
+            handleAutofillCredentialsSubmitted(payload, origin: frameOrigin)
+        default:
+            return
+        }
+    }
+
     func openDownloadedFile(_ download: BrowserDownload) {
         guard download.status == .finished, let destinationURL = download.destinationURL else {
             return
@@ -648,6 +728,91 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         resolveMediaPermissionToast(id: id, decision: .deny)
     }
 
+    func confirmCredentialToast(id: BrowserToast.ID) {
+        guard let request = credentialSaveRequests.removeValue(forKey: id) else {
+            removeToast(id: id)
+            return
+        }
+
+        removeToast(id: id)
+        Task { [weak self, persistence] in
+            do {
+                if request.isUpdate {
+                    do {
+                        try BrowserCredentialKeychain.updatePassword(request.password, for: request.credential)
+                    } catch BrowserCredentialKeychainError.unhandledStatus(let status) where status == errSecItemNotFound {
+                        try BrowserCredentialKeychain.savePassword(request.password, for: request.credential)
+                    }
+                } else {
+                    try BrowserCredentialKeychain.savePassword(request.password, for: request.credential)
+                }
+            } catch {
+                self?.showCredentialStatusToast(
+                    title: "Could Not Save Password",
+                    message: "The password was not saved.",
+                    status: .failure
+                )
+                return
+            }
+
+            let didSaveMetadata = await persistence.saveLoginCredential(request.credential)
+            if !didSaveMetadata {
+                if !request.isUpdate {
+                    try? BrowserCredentialKeychain.deletePassword(for: request.credential)
+                }
+                self?.showCredentialStatusToast(
+                    title: "Could Not Save Password",
+                    message: "The password was not saved.",
+                    status: .failure
+                )
+                return
+            }
+
+            self?.applySavedLoginCredential(request.credential)
+            self?.showCredentialStatusToast(
+                title: request.isUpdate ? "Password Updated" : "Password Saved",
+                message: request.credential.displayHost,
+                status: .success
+            )
+        }
+    }
+
+    func deleteLoginCredential(id: StoredLoginCredential.ID) {
+        guard let credential = loginCredentials.first(where: { $0.id == id }) else {
+            return
+        }
+
+        Task { [weak self, persistence] in
+            do {
+                try BrowserCredentialKeychain.deletePassword(for: credential)
+            } catch {
+                self?.showCredentialStatusToast(
+                    title: "Could Not Delete Password",
+                    message: credential.displayHost,
+                    status: .failure
+                )
+                return
+            }
+
+            let didDeleteMetadata = await persistence.deleteLoginCredential(id: id)
+            guard didDeleteMetadata else {
+                self?.showCredentialStatusToast(
+                    title: "Could Not Delete Password",
+                    message: credential.displayHost,
+                    status: .failure
+                )
+                return
+            }
+
+            self?.removeLoginCredential(id: id)
+            self?.showCredentialStatusToast(
+                title: "Password Deleted",
+                message: credential.displayHost,
+                status: .success
+            )
+        }
+    }
+
     func setBezelStyle(_ style: BrowserBezelStyle) {
         let resolvedStyle = style.resolvedForCurrentOS
         guard bezelStyle != resolvedStyle else {
@@ -668,6 +833,28 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         searchEngine = engine
         Task { [persistence] in
             await persistence.saveSetting(key: "searchEngine", value: engine.rawValue)
+        }
+    }
+
+    func setPasswordAutofillEnabled(_ isEnabled: Bool) {
+        guard isPasswordAutofillEnabled != isEnabled else {
+            return
+        }
+
+        isPasswordAutofillEnabled = isEnabled
+        Task { [persistence] in
+            await persistence.saveSetting(key: Self.passwordAutofillSettingKey, value: isEnabled ? "true" : "false")
+        }
+    }
+
+    func setPasswordSavePromptEnabled(_ isEnabled: Bool) {
+        guard isPasswordSavePromptEnabled != isEnabled else {
+            return
+        }
+
+        isPasswordSavePromptEnabled = isEnabled
+        Task { [persistence] in
+            await persistence.saveSetting(key: Self.passwordSavePromptSettingKey, value: isEnabled ? "true" : "false")
         }
     }
 
@@ -788,6 +975,7 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
             return
         }
 
+        credentialSaveRequests.removeValue(forKey: id)
         removeToast(id: id)
     }
 
@@ -866,17 +1054,24 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         windowFeatures: WKWindowFeatures
     ) -> WKWebView? {
         configuration.userContentController.removeScriptMessageHandler(forName: "browserConsole")
+        configuration.userContentController.removeScriptMessageHandler(forName: "browserAutofill", contentWorld: .defaultClient)
+        configuration.userContentController.add(
+            BrowserAutofillScriptMessageHandler(browser: self),
+            contentWorld: .defaultClient,
+            name: "browserAutofill"
+        )
 
         let newWebView = BrowserWebView(frame: .zero, configuration: configuration)
         newWebView.underPageBackgroundColor = .clear
 
         let newTab = makeTab(webView: newWebView)
-        if let sourceTab = tab(for: webView) {
-            historyCursorSourceByTabID[newTab.id] = sourceTab.id
+        let sourceTabID = tab(for: webView)?.id
+        if let sourceTabID {
+            historyCursorSourceByTabID[newTab.id] = sourceTabID
         } else {
             historyCursorByTabID[newTab.id] = BrowserHistoryCursor(journeyID: UUID())
         }
-        tabs.append(newTab)
+        insertTab(newTab, after: sourceTabID)
         selectedTabID = newTab.id
         requestMount(for: newTab.id)
         persistSession()
@@ -1019,6 +1214,7 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
 
         applySettings(startupData.settings)
         applyUserScripts(startupData.userScripts)
+        applyLoginCredentials(startupData.loginCredentials)
         applyMediaPermissionDecisions(startupData.mediaPermissionDecisions)
         downloads = startupData.downloads
         applyAutocompleteSites(startupData.autocompleteSites)
@@ -1056,6 +1252,14 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
            let storedSearchEngine = BrowserSearchEngine(rawValue: rawSearchEngine) {
             searchEngine = storedSearchEngine
         }
+
+        if let rawPasswordAutofillEnabled = settings[Self.passwordAutofillSettingKey] {
+            isPasswordAutofillEnabled = Self.settingBool(rawPasswordAutofillEnabled, defaultValue: true)
+        }
+
+        if let rawPasswordSavePromptEnabled = settings[Self.passwordSavePromptSettingKey] {
+            isPasswordSavePromptEnabled = Self.settingBool(rawPasswordSavePromptEnabled, defaultValue: true)
+        }
     }
 
     private func applyUserScripts(_ storedScripts: [StoredBrowserUserScript]) {
@@ -1071,6 +1275,10 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
                 position: storedScript.position
             )
         }
+    }
+
+    private func applyLoginCredentials(_ storedCredentials: [StoredLoginCredential]) {
+        loginCredentials = storedCredentials
     }
 
     private func applyMediaPermissionDecisions(_ storedDecisions: [StoredMediaPermissionDecision]) {
@@ -1236,7 +1444,12 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         let restoredTabs = session.tabs
             .sorted { $0.position < $1.position }
             .map { storedTab in
-                let tab = makeTab(id: storedTab.id, title: storedTab.title, url: storedTab.url)
+                let tab = makeTab(
+                    id: storedTab.id,
+                    title: storedTab.title,
+                    url: storedTab.url,
+                    favicon: storedTab.faviconData.flatMap(NSImage.init(data:))
+                )
                 historyCursorByTabID[tab.id] = BrowserHistoryCursor(journeyID: UUID())
                 if let url = storedTab.url {
                     pendingTabLoads[tab.id] = url
@@ -1273,7 +1486,8 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         id: BrowserTab.ID = UUID(),
         webView: BrowserWebView? = nil,
         title: String = "New Tab",
-        url: URL? = nil
+        url: URL? = nil,
+        favicon: NSImage? = nil
     ) -> BrowserTab {
         let resolvedWebView: BrowserWebView
         if let webView {
@@ -1281,6 +1495,7 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
             BrowserWebView.replaceConfiguredUserScripts(
                 on: webView.configuration.userContentController,
                 includeConsoleBridge: false,
+                includeAutofillBridge: true,
                 userScripts: userScripts
             )
         } else {
@@ -1293,7 +1508,8 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
             id: id,
             webView: resolvedWebView,
             title: title,
-            url: url
+            url: url,
+            favicon: favicon
         )
 
         tab.attachUIDelegate(self)
@@ -1315,6 +1531,9 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         tab.onDownloadDidBegin = { [weak self] tab, download, sourceURL in
             self?.begin(download, from: sourceURL ?? tab.url)
         }
+        tab.onExternalApplicationNavigationRequest = { [weak self] tab, url, sourceURL in
+            self?.promptToOpenExternalApplication(url, from: tab, sourceURL: sourceURL)
+        }
 
         return tab
     }
@@ -1323,6 +1542,7 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         BrowserWebView.configure(
             configuration,
             consoleMessageHandler: BrowserConsoleScriptMessageHandler(browser: self),
+            autofillMessageHandler: BrowserAutofillScriptMessageHandler(browser: self),
             userScripts: userScripts
         )
     }
@@ -1333,6 +1553,36 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
             .joined(separator: "\n")
+    }
+
+    private static func settingBool(_ rawValue: String, defaultValue: Bool) -> Bool {
+        switch rawValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "true", "1", "yes", "on":
+            return true
+        case "false", "0", "no", "off":
+            return false
+        default:
+            return defaultValue
+        }
+    }
+
+    private static func credentialOriginParts(for url: URL?) -> BrowserCredentialOrigin? {
+        guard let url,
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let host = url.host()?.lowercased(),
+              !host.isEmpty else {
+            return nil
+        }
+
+        let port = url.port
+        let origin = port.map { "\(scheme)://\(host):\($0)" } ?? "\(scheme)://\(host)"
+        return BrowserCredentialOrigin(
+            origin: origin,
+            scheme: scheme,
+            host: host,
+            port: port
+        )
     }
 
     nonisolated private static func storedUserScript(from script: BrowserUserScript) -> StoredBrowserUserScript {
@@ -1359,6 +1609,7 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
             BrowserWebView.replaceConfiguredUserScripts(
                 on: tab.webView.configuration.userContentController,
                 includeConsoleBridge: true,
+                includeAutofillBridge: true,
                 userScripts: userScripts
             )
 
@@ -1366,6 +1617,268 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
                 tab.webView.reload()
             }
         }
+    }
+
+    private func handleAutofillFormDetected(
+        _ payload: [String: Any],
+        webView: BrowserWebView,
+        frameInfo: WKFrameInfo,
+        origin: BrowserCredentialOrigin
+    ) {
+        guard isPasswordAutofillEnabled,
+              let formID = Self.trimmedPayloadString("formID", in: payload) else {
+            return
+        }
+
+        let credentials = matchingLoginCredentials(for: origin)
+        guard !credentials.isEmpty else {
+            return
+        }
+
+        let formKey = credentialFormKey(webView: webView, origin: origin, formID: formID)
+        if credentials.count == 1 {
+            guard !filledAutofillFormKeys.contains(formKey) else {
+                return
+            }
+
+            filledAutofillFormKeys.insert(formKey)
+            fillLoginCredential(credentials[0], formID: formID, webView: webView, frameInfo: frameInfo)
+            return
+        }
+
+        guard !promptedAutofillFormKeys.contains(formKey) else {
+            return
+        }
+
+        promptedAutofillFormKeys.insert(formKey)
+        promptForLoginCredentialFill(credentials, formID: formID, webView: webView, frameInfo: frameInfo, origin: origin)
+    }
+
+    private func handleAutofillCredentialsSubmitted(_ payload: [String: Any], origin: BrowserCredentialOrigin) {
+        guard isPasswordSavePromptEnabled,
+              let username = Self.trimmedPayloadString("username", in: payload),
+              let password = Self.rawPayloadString("password", in: payload),
+              !password.isEmpty else {
+            return
+        }
+
+        let usernameFieldName = Self.trimmedPayloadString("usernameFieldName", in: payload)
+        let passwordFieldName = Self.trimmedPayloadString("passwordFieldName", in: payload)
+        let existingCredential = loginCredentials.first {
+            $0.origin == origin.origin && $0.username.caseInsensitiveCompare(username) == .orderedSame
+        }
+
+        if let existingCredential,
+           let currentPassword = try? BrowserCredentialKeychain.password(for: existingCredential),
+           currentPassword == password {
+            return
+        }
+
+        let now = Date()
+        let credential = StoredLoginCredential(
+            id: existingCredential?.id ?? UUID(),
+            origin: origin.origin,
+            scheme: origin.scheme,
+            host: origin.host,
+            port: origin.port,
+            username: username,
+            usernameFieldName: usernameFieldName,
+            passwordFieldName: passwordFieldName,
+            createdAt: existingCredential?.createdAt ?? now,
+            updatedAt: now,
+            lastUsedAt: existingCredential?.lastUsedAt
+        )
+
+        showCredentialSavePrompt(
+            credential: credential,
+            password: password,
+            isUpdate: existingCredential != nil
+        )
+    }
+
+    private func matchingLoginCredentials(for origin: BrowserCredentialOrigin) -> [StoredLoginCredential] {
+        loginCredentials
+            .filter { $0.origin == origin.origin }
+            .sorted { left, right in
+                switch (left.lastUsedAt, right.lastUsedAt) {
+                case let (leftUsed?, rightUsed?) where leftUsed != rightUsed:
+                    return leftUsed > rightUsed
+                case (_?, nil):
+                    return true
+                case (nil, _?):
+                    return false
+                default:
+                    return left.updatedAt > right.updatedAt
+                }
+            }
+    }
+
+    private func promptForLoginCredentialFill(
+        _ credentials: [StoredLoginCredential],
+        formID: String,
+        webView: BrowserWebView,
+        frameInfo: WKFrameInfo,
+        origin: BrowserCredentialOrigin
+    ) {
+        let picker = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 320, height: 28), pullsDown: false)
+        for credential in credentials {
+            picker.addItem(withTitle: credential.displayUsername)
+        }
+
+        let alert = NSAlert()
+        alert.messageText = "Choose Password"
+        alert.informativeText = "Fill a saved login for \(origin.displayHost)."
+        alert.accessoryView = picker
+        alert.addButton(withTitle: "Fill")
+        alert.addButton(withTitle: "Cancel")
+
+        runAlert(alert, attachedTo: webView.window) { [weak self, weak webView] response in
+            guard response == .alertFirstButtonReturn,
+                  let self,
+                  let webView,
+                  credentials.indices.contains(picker.indexOfSelectedItem) else {
+                return
+            }
+
+            let selectedCredential = credentials[picker.indexOfSelectedItem]
+            self.fillLoginCredential(selectedCredential, formID: formID, webView: webView, frameInfo: frameInfo)
+        }
+    }
+
+    private func fillLoginCredential(
+        _ credential: StoredLoginCredential,
+        formID: String,
+        webView: BrowserWebView,
+        frameInfo: WKFrameInfo
+    ) {
+        let password: String
+        do {
+            password = try BrowserCredentialKeychain.password(for: credential)
+        } catch {
+            showCredentialStatusToast(
+                title: "Could Not Fill Password",
+                message: credential.displayHost,
+                status: .failure
+            )
+            return
+        }
+
+        let payload: [String: String] = [
+            "formID": formID,
+            "username": credential.username,
+            "password": password
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
+              let json = String(data: data, encoding: .utf8) else {
+            return
+        }
+
+        webView.evaluateJavaScript(
+            "window.__browserAutofillFill && window.__browserAutofillFill(\(json));",
+            in: frameInfo,
+            in: .defaultClient
+        ) { [weak self] result in
+            guard let self else {
+                return
+            }
+
+            switch result {
+            case .success(let value) where Self.autofillFillSucceeded(value):
+                self.markLoginCredentialUsed(credential)
+            case .success, .failure:
+                self.showCredentialStatusToast(
+                    title: "Could Not Fill Password",
+                    message: credential.displayHost,
+                    status: .failure
+                )
+            }
+        }
+    }
+
+    private func showCredentialSavePrompt(
+        credential: StoredLoginCredential,
+        password: String,
+        isUpdate: Bool
+    ) {
+        let id = UUID()
+        credentialSaveRequests[id] = BrowserCredentialSaveRequest(
+            credential: credential,
+            password: password,
+            isUpdate: isUpdate
+        )
+        showToast(BrowserToast(
+            id: id,
+            kind: .credentialPrompt,
+            title: "\(isUpdate ? "Update" : "Save") password for \(credential.displayHost)?",
+            message: credential.displayUsername,
+            iconSystemName: "key.fill",
+            status: .pending,
+            progressFraction: nil,
+            downloadID: nil,
+            primaryActionTitle: isUpdate ? "Update" : "Save"
+        ))
+    }
+
+    private func applySavedLoginCredential(_ credential: StoredLoginCredential) {
+        if let index = loginCredentials.firstIndex(where: { $0.id == credential.id }) {
+            loginCredentials[index] = credential
+        } else if let index = loginCredentials.firstIndex(where: { $0.origin == credential.origin && $0.username == credential.username }) {
+            loginCredentials[index] = credential
+        } else {
+            loginCredentials.append(credential)
+        }
+    }
+
+    private func removeLoginCredential(id: StoredLoginCredential.ID) {
+        loginCredentials.removeAll { $0.id == id }
+    }
+
+    private func markLoginCredentialUsed(_ credential: StoredLoginCredential) {
+        let now = Date()
+        let updatedCredential = StoredLoginCredential(
+            id: credential.id,
+            origin: credential.origin,
+            scheme: credential.scheme,
+            host: credential.host,
+            port: credential.port,
+            username: credential.username,
+            usernameFieldName: credential.usernameFieldName,
+            passwordFieldName: credential.passwordFieldName,
+            createdAt: credential.createdAt,
+            updatedAt: now,
+            lastUsedAt: now
+        )
+
+        applySavedLoginCredential(updatedCredential)
+        Task { [persistence] in
+            await persistence.markLoginCredentialUsed(id: credential.id, usedAt: now)
+        }
+    }
+
+    private func credentialFormKey(webView: BrowserWebView, origin: BrowserCredentialOrigin, formID: String) -> String {
+        "\(ObjectIdentifier(webView).hashValue)|\(origin.origin)|\(formID)"
+    }
+
+    private static func autofillFillSucceeded(_ value: Any) -> Bool {
+        if let boolValue = value as? Bool {
+            return boolValue
+        }
+
+        if let numberValue = value as? NSNumber {
+            return numberValue.boolValue
+        }
+
+        return false
+    }
+
+    private static func rawPayloadString(_ key: String, in payload: [String: Any]) -> String? {
+        payload[key] as? String
+    }
+
+    private static func trimmedPayloadString(_ key: String, in payload: [String: Any]) -> String? {
+        rawPayloadString(key, in: payload)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nonEmpty
     }
 
     private func appendConsoleMessage(level: String, message: String, url: String?, source: String) {
@@ -1578,9 +2091,25 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         ))
     }
 
+    private func showCredentialStatusToast(title: String, message: String, status: BrowserToastStatus) {
+        let id = UUID()
+        showToast(BrowserToast(
+            id: id,
+            kind: .credentialStatus,
+            title: title,
+            message: message,
+            iconSystemName: status == .success ? "key.fill" : "exclamationmark.triangle.fill",
+            status: status,
+            progressFraction: nil,
+            downloadID: nil
+        ))
+        scheduleToastDismissal(id: id, after: 5)
+    }
+
     private func removeToast(id: BrowserToast.ID) {
         cancelToastDismissal(id: id)
         mediaPermissionRequests.removeValue(forKey: id)
+        credentialSaveRequests.removeValue(forKey: id)
         if let toast = toasts.first(where: { $0.id == id }), let downloadID = toast.downloadID {
             toastIDsByDownloadID.removeValue(forKey: downloadID)
         }
@@ -2053,6 +2582,16 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         return index.map { tabs.index(after: $0) } ?? tabs.startIndex
     }
 
+    private func insertTab(_ tab: BrowserTab, after sourceTabID: BrowserTab.ID?) {
+        guard let sourceTabID,
+              let sourceIndex = tabs.firstIndex(where: { $0.id == sourceTabID }) else {
+            tabs.append(tab)
+            return
+        }
+
+        tabs.insert(tab, at: tabs.index(after: sourceIndex))
+    }
+
     private func replacementSelectedTabID(closedIndex: Int) -> BrowserTab.ID? {
         guard !tabs.isEmpty else {
             return nil
@@ -2118,6 +2657,39 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         } else {
             completion(alert.runModal())
         }
+    }
+
+    private static func applicationDisplayName(at url: URL) -> String {
+        if let bundle = Bundle(url: url) {
+            for key in ["CFBundleDisplayName", "CFBundleName"] {
+                if let value = bundle.object(forInfoDictionaryKey: key) as? String {
+                    let trimmedValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmedValue.isEmpty {
+                        return trimmedValue
+                    }
+                }
+            }
+        }
+
+        let displayName = FileManager.default.displayName(atPath: url.path)
+        if displayName.hasSuffix(".app") {
+            return String(displayName.dropLast(4))
+        }
+
+        return displayName
+    }
+
+    private static func externalApplicationSourceDescription(for url: URL?) -> String {
+        guard let url,
+              let scheme = url.scheme?.lowercased(),
+              let host = url.host(),
+              !host.isEmpty,
+              scheme == "http" || scheme == "https" else {
+            return "This page"
+        }
+
+        let port = url.port.map { ":\($0)" } ?? ""
+        return "\(scheme)://\(host)\(port)"
     }
 
     private func dialogTitle(for frame: WKFrameInfo) -> String {
@@ -2251,4 +2823,21 @@ private struct BrowserMediaPermissionRequest {
     let originKey: String
     let deviceKinds: Set<BrowserMediaDeviceKind>
     let handler: (WKPermissionDecision) -> Void
+}
+
+private struct BrowserCredentialOrigin {
+    let origin: String
+    let scheme: String
+    let host: String
+    let port: Int?
+
+    var displayHost: String {
+        host.removingWWWPrefix
+    }
+}
+
+private struct BrowserCredentialSaveRequest: Sendable {
+    let credential: StoredLoginCredential
+    let password: String
+    let isUpdate: Bool
 }

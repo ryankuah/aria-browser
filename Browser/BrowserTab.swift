@@ -23,6 +23,7 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable, WKNavigationDe
     var onFaviconDidLoad: ((BrowserTab, NSImage) -> Void)?
     var onFullscreenStateDidChange: ((BrowserTab) -> Void)?
     var onDownloadDidBegin: ((BrowserTab, WKDownload, URL?) -> Void)?
+    var onExternalApplicationNavigationRequest: ((BrowserTab, URL, URL?) -> Void)?
 
     private var fullscreenObservation: NSKeyValueObservation?
     private var urlObservation: NSKeyValueObservation?
@@ -65,7 +66,8 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable, WKNavigationDe
         id: UUID = UUID(),
         webView: BrowserWebView = BrowserWebView(frame: .zero, configuration: BrowserWebView.makeConfiguration()),
         title: String = "New Tab",
-        url: URL? = nil
+        url: URL? = nil,
+        favicon: NSImage? = nil
     ) {
         self.id = id
         self.webView = webView
@@ -73,6 +75,7 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable, WKNavigationDe
 
         self.title = title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? BrowserNavigation.defaultTitle(for: url) : title
         self.url = url
+        self.favicon = favicon
 
         webView.navigationDelegate = self
         webView.underPageBackgroundColor = .clear
@@ -109,6 +112,7 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable, WKNavigationDe
             return
         }
 
+        clearFaviconIfNeeded(for: url)
         self.url = url
         title = BrowserNavigation.defaultTitle(for: url)
         isLoading = false
@@ -116,7 +120,6 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable, WKNavigationDe
         canGoForward = false
         originSecurityState = BrowserNavigation.originSecurityState(for: url)
         pageFailure = nil
-        clearFavicon()
         onStateDidChange?(self)
     }
 
@@ -125,6 +128,7 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable, WKNavigationDe
             return
         }
 
+        clearFaviconIfNeeded(for: url)
         self.url = url
         pendingNavigationURL = url
         title = BrowserNavigation.defaultTitle(for: url)
@@ -133,7 +137,6 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable, WKNavigationDe
         canGoForward = BrowserNavigation.isInternalPageURL(url) ? false : canGoForward
         originSecurityState = BrowserNavigation.originSecurityState(for: url)
         pageFailure = nil
-        clearFavicon()
         if BrowserNavigation.isInternalPageURL(url) {
             pendingNavigationURL = nil
             onStateDidChange?(self)
@@ -270,12 +273,14 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable, WKNavigationDe
             return
         }
 
+        clearFaviconIfNeeded(for: observedURL)
         lastReportedURLString = urlString
         refreshFromWebView()
         onURLDidChange?(self, observedURL)
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        clearFaviconIfNeeded(for: pendingNavigationURL ?? webView.url)
         originSecurityState = BrowserNavigation.originSecurityState(for: pendingNavigationURL ?? webView.url ?? url)
         pageFailure = nil
         refreshFromWebView()
@@ -334,6 +339,13 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable, WKNavigationDe
 
         if navigationAction.shouldPerformDownload {
             decisionHandler(BrowserNavigation.isAllowedDownloadURL(url) ? .download : .cancel)
+            return
+        }
+
+        if BrowserNavigation.isExternalApplicationURL(url),
+           NSWorkspace.shared.urlForApplication(toOpen: url) != nil {
+            onExternalApplicationNavigationRequest?(self, url, navigationAction.sourceFrame.request.url)
+            decisionHandler(.cancel)
             return
         }
 
@@ -476,6 +488,17 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable, WKNavigationDe
         favicon = nil
     }
 
+    private func clearFaviconIfNeeded(for nextURL: URL?) {
+        let currentOrigin = url.flatMap(BrowserNavigation.originKey(for:))
+        let nextOrigin = nextURL.flatMap(BrowserNavigation.originKey(for:))
+        guard let currentOrigin,
+              let nextOrigin,
+              currentOrigin == nextOrigin else {
+            clearFavicon()
+            return
+        }
+    }
+
     private func refreshFavicon() {
         guard let pageURL = webView.url ?? url,
               BrowserNavigation.isAllowedNavigationURL(pageURL) else {
@@ -484,7 +507,6 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable, WKNavigationDe
         }
 
         faviconLoadTask?.cancel()
-        favicon = nil
 
         let requestID = UUID()
         faviconRequestID = requestID
@@ -496,9 +518,6 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable, WKNavigationDe
     private func loadFavicon(for pageURL: URL, requestID: UUID) async {
         guard let image = await Self.fetchFavicon(for: pageURL, webView: webView),
               faviconRequestID == requestID else {
-            if faviconRequestID == requestID {
-                favicon = nil
-            }
             return
         }
 

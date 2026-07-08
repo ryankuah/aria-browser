@@ -433,6 +433,8 @@ struct BrowserMediaPermissionSnapshot: Equatable {
 enum BrowserToastKind: Equatable {
     case mediaPermission
     case download
+    case credentialPrompt
+    case credentialStatus
 }
 
 enum BrowserToastStatus: Equatable {
@@ -450,6 +452,7 @@ struct BrowserToast: Identifiable, Equatable {
     var status: BrowserToastStatus
     var progressFraction: Double?
     var downloadID: BrowserDownload.ID?
+    var primaryActionTitle: String? = nil
 }
 
 extension NSColor {

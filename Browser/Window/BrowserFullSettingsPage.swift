@@ -40,6 +40,7 @@ struct BrowserFullSettingsPage: View {
                                 HStack(alignment: .top, spacing: 20) {
                                     VStack(spacing: 20) {
                                         generalCard
+                                        passwordsCard
                                     }
                                     .frame(maxWidth: .infinity, alignment: .top)
 
@@ -50,6 +51,7 @@ struct BrowserFullSettingsPage: View {
                                 }
                             } else {
                                 generalCard
+                                passwordsCard
                                 appearanceCard
                             }
 
@@ -134,6 +136,49 @@ struct BrowserFullSettingsPage: View {
                             isSelected: browser.bezelStyle == style
                         ) {
                             browser.setBezelStyle(style)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var passwordsCard: some View {
+        SettingsCard(title: "Passwords", systemName: "key.fill") {
+            VStack(alignment: .leading, spacing: 12) {
+                FullSettingsPreferenceRow(
+                    title: "Autofill Passwords",
+                    systemName: "rectangle.and.pencil.and.ellipsis",
+                    isOn: browser.isPasswordAutofillEnabled
+                ) {
+                    browser.setPasswordAutofillEnabled(!browser.isPasswordAutofillEnabled)
+                }
+
+                SettingsRowDivider()
+
+                FullSettingsPreferenceRow(
+                    title: "Offer to Save Passwords",
+                    systemName: "plus.circle",
+                    isOn: browser.isPasswordSavePromptEnabled
+                ) {
+                    browser.setPasswordSavePromptEnabled(!browser.isPasswordSavePromptEnabled)
+                }
+
+                SettingsRowDivider()
+
+                SettingsField(label: "Saved Passwords") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if browser.sortedLoginCredentials.isEmpty {
+                            SettingsEmptyRow(
+                                systemName: "key.slash",
+                                message: "No saved passwords."
+                            )
+                        } else {
+                            ForEach(browser.sortedLoginCredentials) { credential in
+                                FullSettingsCredentialRow(credential: credential) {
+                                    browser.deleteLoginCredential(id: credential.id)
+                                }
+                            }
                         }
                     }
                 }
@@ -492,6 +537,87 @@ private struct FullSettingsLabel: View {
             .foregroundStyle(.secondary)
             .textCase(.uppercase)
             .kerning(0.4)
+    }
+}
+
+private struct FullSettingsPreferenceRow: View {
+    let title: String
+    let systemName: String
+    let isOn: Bool
+    let onToggle: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: systemName)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 18)
+
+            Text(title)
+                .font(.system(size: 13, weight: .semibold))
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            FullSettingsSwitch(isOn: isOn, action: onToggle)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.primary.opacity(0.04))
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.05), lineWidth: 1)
+        }
+    }
+}
+
+private struct FullSettingsCredentialRow: View {
+    let credential: StoredLoginCredential
+    let onDelete: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "key.fill")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 18)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(credential.displayHost)
+                    .font(.system(size: 13, weight: .semibold))
+                    .lineLimit(1)
+
+                Text(credential.displayUsername)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Button(action: onDelete) {
+                Image(systemName: "trash")
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 30, height: 30)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .cursor(.pointingHand)
+            .accessibilityLabel("Delete password for \(credential.displayHost)")
+            .help("Delete")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.primary.opacity(0.04))
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.05), lineWidth: 1)
+        }
     }
 }
 

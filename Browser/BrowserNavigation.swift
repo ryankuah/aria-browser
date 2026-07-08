@@ -3,6 +3,15 @@ import Foundation
 enum BrowserNavigation {
     private static let allowedURLSchemes: Set<String> = ["http", "https"]
     private static let allowedDownloadURLSchemes: Set<String> = ["http", "https", "blob", "data"]
+    private static let blockedExternalApplicationSchemes: Set<String> = [
+        "about",
+        "blob",
+        "browser",
+        "data",
+        "file",
+        "javascript",
+        "webkit-fake-url"
+    ]
 
     static func url(from address: String, searchEngine: BrowserSearchEngine) -> URL? {
         let trimmed = address.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -59,6 +68,17 @@ enum BrowserNavigation {
         }
 
         return allowedDownloadURLSchemes.contains(scheme)
+    }
+
+    static func isExternalApplicationURL(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased(),
+              !scheme.isEmpty,
+              !allowedURLSchemes.contains(scheme),
+              BrowserInternalPage.page(for: url) == nil else {
+            return false
+        }
+
+        return !blockedExternalApplicationSchemes.contains(scheme)
     }
 
     static func originSecurityState(for url: URL?) -> OriginSecurityState {

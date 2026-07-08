@@ -10,6 +10,7 @@ struct StoredBrowserTab: Sendable {
     let position: Int
     let title: String
     let url: URL?
+    let faviconData: Data?
 }
 
 struct BrowserTabSnapshot: Sendable {
@@ -89,6 +90,28 @@ struct StoredBrowserUserScript: Sendable {
     let isEnabled: Bool
     let injectionTime: String
     let forMainFrameOnly: Bool
+}
+
+struct StoredLoginCredential: Sendable, Identifiable, Equatable {
+    let id: UUID
+    let origin: String
+    let scheme: String
+    let host: String
+    let port: Int?
+    let username: String
+    let usernameFieldName: String?
+    let passwordFieldName: String?
+    let createdAt: Date
+    let updatedAt: Date
+    let lastUsedAt: Date?
+
+    var displayHost: String {
+        host.removingWWWPrefix
+    }
+
+    var displayUsername: String {
+        username.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty ?? "Unnamed account"
+    }
 }
 
 enum BrowserDatabaseError: LocalizedError {

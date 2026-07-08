@@ -3,6 +3,7 @@ import Foundation
 struct BrowserStartupData: Sendable {
     var settings: [String: String] = [:]
     var userScripts: [StoredBrowserUserScript] = []
+    var loginCredentials: [StoredLoginCredential] = []
     var mediaPermissionDecisions: [StoredMediaPermissionDecision] = []
     var bookmarks: [StoredBrowserBookmark] = []
     var autocompleteSites: [StoredAutocompleteSite] = []
@@ -19,6 +20,7 @@ actor BrowserPersistenceStore {
         var data = BrowserStartupData()
         data.settings = load(default: [:]) { try $0.loadSettings() }
         data.userScripts = load(default: []) { try $0.loadUserScripts() }
+        data.loginCredentials = load(default: []) { try $0.loadLoginCredentials() }
         data.mediaPermissionDecisions = load(default: []) { try $0.loadMediaPermissionDecisions() }
         data.autocompleteSites = load(default: []) { try $0.loadAutocompleteSites(limit: 500) }
         data.autocompletePages = load(default: []) { try $0.loadAutocompletePages(limit: 1000) }
@@ -60,6 +62,31 @@ actor BrowserPersistenceStore {
             for script in remainingScripts {
                 try database.saveUserScript(script)
             }
+        }
+    }
+
+    func loadLoginCredentials() -> [StoredLoginCredential] {
+        load(default: []) { try $0.loadLoginCredentials() }
+    }
+
+    @discardableResult
+    func saveLoginCredential(_ credential: StoredLoginCredential) -> Bool {
+        saveReturningBool("Browser login credential save failed") {
+            try $0.saveLoginCredential(credential)
+        }
+    }
+
+    @discardableResult
+    func deleteLoginCredential(id: UUID) -> Bool {
+        saveReturningBool("Browser login credential delete failed") {
+            try $0.deleteLoginCredential(id: id)
+        }
+    }
+
+    @discardableResult
+    func markLoginCredentialUsed(id: UUID, usedAt: Date) -> Bool {
+        saveReturningBool("Browser login credential last-used update failed") {
+            try $0.markLoginCredentialUsed(id: id, usedAt: usedAt)
         }
     }
 
@@ -165,6 +192,20 @@ actor BrowserPersistenceStore {
             try operation(database)
         } catch {
             NSLog("\(failureMessage): \(error.localizedDescription)")
+        }
+    }
+
+    private func saveReturningBool(_ failureMessage: String, operation: (BrowserDatabase) throws -> Void) -> Bool {
+        guard let database = databaseIfAvailable() else {
+            return false
+        }
+
+        do {
+            try operation(database)
+            return true
+        } catch {
+            NSLog("\(failureMessage): \(error.localizedDescription)")
+            return false
         }
     }
 

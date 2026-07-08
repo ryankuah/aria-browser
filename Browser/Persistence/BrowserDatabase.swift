@@ -624,6 +624,111 @@ final class BrowserDatabase {
         }
     }
 
+    func loadLoginCredentials() throws -> [StoredLoginCredential] {
+        try withStatement(
+            """
+            SELECT id, origin, scheme, host, port, username, username_field_name, password_field_name, created_at, updated_at, last_used_at
+            FROM login_credentials
+            ORDER BY lower(host) ASC, lower(username) ASC
+            """
+        ) { statement in
+            var credentials: [StoredLoginCredential] = []
+            while try statement.step() == SQLite.row {
+                guard let rawID = statement.text(at: 0),
+                      let id = UUID(uuidString: rawID),
+                      let origin = statement.text(at: 1),
+                      let scheme = statement.text(at: 2),
+                      let host = statement.text(at: 3),
+                      let username = statement.text(at: 5) else {
+                    continue
+                }
+
+                credentials.append(StoredLoginCredential(
+                    id: id,
+                    origin: origin,
+                    scheme: scheme,
+                    host: host,
+                    port: statement.optionalInt64(at: 4).map(Int.init),
+                    username: username,
+                    usernameFieldName: statement.text(at: 6),
+                    passwordFieldName: statement.text(at: 7),
+                    createdAt: Date(timeIntervalSince1970: statement.double(at: 8)),
+                    updatedAt: Date(timeIntervalSince1970: statement.double(at: 9)),
+                    lastUsedAt: statement.optionalDouble(at: 10).map(Date.init(timeIntervalSince1970:))
+                ))
+            }
+
+            return credentials
+        }
+    }
+
+    func saveLoginCredential(_ credential: StoredLoginCredential) throws {
+        try withStatement(
+            """
+            INSERT INTO login_credentials (
+                id,
+                origin,
+                scheme,
+                host,
+                port,
+                username,
+                username_field_name,
+                password_field_name,
+                created_at,
+                updated_at,
+                last_used_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                origin = excluded.origin,
+                scheme = excluded.scheme,
+                host = excluded.host,
+                port = excluded.port,
+                username = excluded.username,
+                username_field_name = excluded.username_field_name,
+                password_field_name = excluded.password_field_name,
+                updated_at = excluded.updated_at,
+                last_used_at = excluded.last_used_at
+            """
+        ) { statement in
+            try statement.bind(credential.id.uuidString, at: 1)
+            try statement.bind(credential.origin, at: 2)
+            try statement.bind(credential.scheme, at: 3)
+            try statement.bind(credential.host, at: 4)
+            try statement.bind(credential.port.map(Int64.init), at: 5)
+            try statement.bind(credential.username, at: 6)
+            try statement.bind(credential.usernameFieldName, at: 7)
+            try statement.bind(credential.passwordFieldName, at: 8)
+            try statement.bind(credential.createdAt.timeIntervalSince1970, at: 9)
+            try statement.bind(credential.updatedAt.timeIntervalSince1970, at: 10)
+            try statement.bind(credential.lastUsedAt?.timeIntervalSince1970, at: 11)
+            try statement.stepDone()
+        }
+    }
+
+    func deleteLoginCredential(id: UUID) throws {
+        try withStatement("DELETE FROM login_credentials WHERE id = ?") { statement in
+            try statement.bind(id.uuidString, at: 1)
+            try statement.stepDone()
+        }
+    }
+
+    func markLoginCredentialUsed(id: UUID, usedAt: Date) throws {
+        try withStatement(
+            """
+            UPDATE login_credentials
+            SET last_used_at = ?, updated_at = ?
+            WHERE id = ?
+            """
+        ) { statement in
+            let timestamp = usedAt.timeIntervalSince1970
+            try statement.bind(timestamp, at: 1)
+            try statement.bind(timestamp, at: 2)
+            try statement.bind(id.uuidString, at: 3)
+            try statement.stepDone()
+        }
+    }
+
     func loadMediaPermissionDecisions() throws -> [StoredMediaPermissionDecision] {
         try withStatement(
             """
@@ -951,6 +1056,33 @@ final class BrowserDatabase {
                 try execute("PRAGMA user_version = 9")
             }
         }
+
+        if version < 10 {
+            try transaction {
+                try execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS login_credentials (
+                        id TEXT PRIMARY KEY,
+                        origin TEXT NOT NULL,
+                        scheme TEXT NOT NULL,
+                        host TEXT NOT NULL,
+                        port INTEGER,
+                        username TEXT NOT NULL,
+                        username_field_name TEXT,
+                        password_field_name TEXT,
+                        created_at REAL NOT NULL,
+                        updated_at REAL NOT NULL,
+                        last_used_at REAL,
+                        UNIQUE(origin, username)
+                    )
+                    """
+                )
+
+                try execute("CREATE INDEX IF NOT EXISTS login_credentials_origin_idx ON login_credentials(origin)")
+                try execute("CREATE INDEX IF NOT EXISTS login_credentials_updated_idx ON login_credentials(updated_at DESC)")
+                try execute("PRAGMA user_version = 10")
+            }
+        }
     }
 
     private func createAutocompleteFrequencyTables() throws {
@@ -1131,7 +1263,7 @@ final class BrowserDatabase {
     }
 
     private func loadTabs(sessionID: String) throws -> [StoredBrowserTab] {
-        try withStatement(
+        let tabRows = try withStatement(
             """
             SELECT id, position, title, url
             FROM tabs
@@ -1141,7 +1273,7 @@ final class BrowserDatabase {
         ) { statement in
             try statement.bind(sessionID, at: 1)
 
-            var tabs: [StoredBrowserTab] = []
+            var tabs: [(id: UUID, position: Int, title: String, url: URL?)] = []
             while try statement.step() == SQLite.row {
                 guard let rawID = statement.text(at: 0),
                       let id = UUID(uuidString: rawID) else {
@@ -1149,17 +1281,46 @@ final class BrowserDatabase {
                 }
 
                 let rawURL = statement.text(at: 3)
-                tabs.append(
-                    StoredBrowserTab(
-                        id: id,
-                        position: Int(statement.int64(at: 1)),
-                        title: statement.text(at: 2) ?? "New Tab",
-                        url: rawURL.flatMap(URL.init(string:))
-                    )
-                )
+                tabs.append((
+                    id: id,
+                    position: Int(statement.int64(at: 1)),
+                    title: statement.text(at: 2) ?? "New Tab",
+                    url: rawURL.flatMap(URL.init(string:))
+                ))
             }
 
             return tabs
+        }
+
+        var tabs: [StoredBrowserTab] = []
+        for row in tabRows {
+            tabs.append(
+                StoredBrowserTab(
+                    id: row.id,
+                    position: row.position,
+                    title: row.title,
+                    url: row.url,
+                    faviconData: try faviconData(for: row.url)
+                )
+            )
+        }
+
+        return tabs
+    }
+
+    private func faviconData(for url: URL?) throws -> Data? {
+        guard let url,
+              let origin = BrowserNavigation.originKey(for: url) else {
+            return nil
+        }
+
+        return try withStatement("SELECT image_data FROM favicons WHERE origin = ?") { statement in
+            try statement.bind(origin, at: 1)
+            guard try statement.step() == SQLite.row else {
+                return nil
+            }
+
+            return statement.data(at: 0)
         }
     }
 
