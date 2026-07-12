@@ -1,10 +1,14 @@
 import AppKit
 import SwiftUI
 
-private func relativeHistoryDateText(for date: Date) -> String {
+@MainActor private let relativeHistoryDateFormatter: RelativeDateTimeFormatter = {
     let formatter = RelativeDateTimeFormatter()
     formatter.unitsStyle = .abbreviated
-    return formatter.localizedString(for: date, relativeTo: Date())
+    return formatter
+}()
+
+@MainActor private func relativeHistoryDateText(for date: Date) -> String {
+    relativeHistoryDateFormatter.localizedString(for: date, relativeTo: Date())
 }
 
 private enum BrowserHistoryViewMode: String, CaseIterable, Identifiable {

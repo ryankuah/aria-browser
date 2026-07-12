@@ -143,10 +143,6 @@ actor BrowserPersistenceStore {
         }
     }
 
-    func loadHistoryEntries(limit: Int) -> [StoredHistoryEntry] {
-        load(default: []) { try $0.loadRecentHistoryEntries(limit: limit) }
-    }
-
     func loadHistoryVisits(limit: Int) -> [StoredHistoryVisit] {
         load(default: []) { try $0.loadRecentHistoryVisits(limit: limit) }
     }

@@ -37,8 +37,8 @@ struct WebView: NSViewRepresentable {
 }
 
 final class BrowserWebContainerView: NSView {
+    private let webViewHost = NSView(frame: .zero)
     private var hostedWebView: BrowserWebView?
-    private var hostedWebViewConstraints: [NSLayoutConstraint] = []
     private var isMountNotificationPending = false
     private var pendingWebView: BrowserWebView?
     private var hasPendingWebView = false
@@ -65,6 +65,10 @@ final class BrowserWebContainerView: NSView {
         wantsLayer = true
         layer?.cornerCurve = .continuous
         layer?.backgroundColor = NSColor.clear.cgColor
+        webViewHost.translatesAutoresizingMaskIntoConstraints = true
+        webViewHost.autoresizingMask = [.width, .height]
+        webViewHost.frame = bounds
+        addSubview(webViewHost)
         updateCornerMask()
     }
 
@@ -87,8 +91,6 @@ final class BrowserWebContainerView: NSView {
         pendingWebView = nil
         hasPendingWebView = false
         fullscreenObservation = nil
-        NSLayoutConstraint.deactivate(hostedWebViewConstraints)
-        hostedWebViewConstraints = []
         hostedWebView?.removeFromSuperview()
         hostedWebView = webView
         isMountNotificationPending = false
@@ -97,13 +99,12 @@ final class BrowserWebContainerView: NSView {
             return
         }
 
-        webView.removeFromSuperview()
         webView.occlusionRects = occlusionRects
-        if bounds.width > 1, bounds.height > 1 {
-            webView.frame = bounds
-        }
-        webView.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(webView)
+        webView.removeFromSuperview()
+        webView.translatesAutoresizingMaskIntoConstraints = true
+        webView.autoresizingMask = [.width, .height]
+        webView.frame = webViewHost.bounds
+        webViewHost.addSubview(webView)
         fullscreenObservation = webView.observe(\.fullscreenState, options: [.new]) { [weak self] webView, _ in
             DispatchQueue.main.async {
                 guard !webView.isElementFullscreenTransitionActive else {
@@ -113,14 +114,6 @@ final class BrowserWebContainerView: NSView {
                 self?.applyPendingWebViewIfReady()
             }
         }
-
-        hostedWebViewConstraints = [
-            webView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            webView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            webView.topAnchor.constraint(equalTo: topAnchor),
-            webView.bottomAnchor.constraint(equalTo: bottomAnchor)
-        ]
-        NSLayoutConstraint.activate(hostedWebViewConstraints)
 
         DispatchQueue.main.async { [weak self] in
             self?.isMountNotificationPending = true
@@ -145,6 +138,7 @@ final class BrowserWebContainerView: NSView {
 
     override func layout() {
         super.layout()
+        webViewHost.frame = bounds
         notifyMountedIfReady()
     }
 
@@ -169,6 +163,7 @@ final class BrowserWebContainerView: NSView {
     private func notifyMountedIfReady() {
         guard isMountNotificationPending,
               let hostedWebView,
+              hostedWebView.superview === webViewHost,
               window != nil else {
             return
         }
@@ -180,7 +175,7 @@ final class BrowserWebContainerView: NSView {
             return
         }
 
-        hostedWebView.frame = bounds
+        hostedWebView.frame = webViewHost.bounds
         hostedWebView.layoutSubtreeIfNeeded()
         focusHostedWebView()
 
@@ -253,20 +248,7 @@ final class BrowserWebView: WKWebView {
     override init(frame: CGRect, configuration: WKWebViewConfiguration) {
         super.init(frame: frame == .zero ? Self.defaultInitialFrame : frame, configuration: configuration)
         allowsBackForwardNavigationGestures = true
-        makeBackgroundTransparent()
         customUserAgent = Self.desktopSafariUserAgent
-    }
-
-    /// macOS `WKWebView` exposes no public API to render with a transparent
-    /// background, so we clear the `drawsBackground` flag — the long-standing
-    /// approach used by Safari's own embedders — to let the rounded container and
-    /// window chrome show through instead of an opaque white fill. The KVC key is
-    /// isolated here so the single private-API touch is intentional and auditable,
-    /// and we pair it with the public `underPageBackgroundColor` for the overscroll
-    /// gutter so the two stay visually consistent.
-    private func makeBackgroundTransparent() {
-        setValue(false, forKey: "drawsBackground")
-        underPageBackgroundColor = .clear
     }
 
     @available(*, unavailable)

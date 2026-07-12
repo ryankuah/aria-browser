@@ -159,16 +159,13 @@ struct BrowserWindowView: View {
     var body: some View {
         GeometryReader { proxy in
             let isElementFullscreenActive = browser.isElementFullscreenActive
-            let activeContentInset: CGFloat = isElementFullscreenActive ? 0 : contentInset
-            let activeTopChromeHeight: CGFloat = isElementFullscreenActive ? 0 : topChromeHeight
-            let activeWebCornerRadius: CGFloat = isElementFullscreenActive ? 0 : webCornerRadius
             let webOrigin = CGPoint(
-                x: activeContentInset,
-                y: activeTopChromeHeight
+                x: contentInset,
+                y: topChromeHeight
             )
             let webSize = CGSize(
-                width: max(proxy.size.width - activeContentInset - activeContentInset, 0),
-                height: max(proxy.size.height - webOrigin.y - activeContentInset, 0)
+                width: max(proxy.size.width - contentInset - contentInset, 0),
+                height: max(proxy.size.height - webOrigin.y - contentInset, 0)
             )
             let sidebarOverlayWidth = min(sidebarWidth, max(webSize.width, 0))
             ZStack(alignment: .topLeading) {
@@ -187,7 +184,7 @@ struct BrowserWindowView: View {
                             tab: activeTab,
                             browser: browser,
                             shouldMountWebView: browser.shouldMountWebView(for: activeTab),
-                            webCornerRadius: activeWebCornerRadius,
+                            webCornerRadius: webCornerRadius,
                             occlusionRects: isElementFullscreenActive ? [] : webViewOcclusionRects(
                                 rootRects: webViewOcclusionRootRects,
                                 webOrigin: webOrigin,
@@ -207,8 +204,8 @@ struct BrowserWindowView: View {
                 }
                 .frame(width: webSize.width, height: webSize.height, alignment: .topLeading)
                 .modifier(WebContentClipModifier(
-                    cornerRadius: activeWebCornerRadius,
-                    isEnabled: !isElementFullscreenActive
+                    cornerRadius: webCornerRadius,
+                    isEnabled: true
                 ))
                 .offset(x: webOrigin.x, y: webOrigin.y)
                 .animation(.easeInOut(duration: 0.16), value: isSidebarVisible)

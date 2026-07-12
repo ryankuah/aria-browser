@@ -182,48 +182,6 @@ final class BrowserDatabase {
         }
     }
 
-    func loadRecentHistoryEntries(limit: Int) throws -> [StoredHistoryEntry] {
-        try withStatement(
-            """
-            SELECT history_visits.url, history_visits.title, latest_visits.latest_visit, latest_visits.visit_count, favicons.image_data
-            FROM history_visits
-            INNER JOIN (
-                SELECT url, MAX(visited_at) AS latest_visit, COUNT(*) AS visit_count
-                FROM history_visits
-                GROUP BY url
-            ) latest_visits
-                ON latest_visits.url = history_visits.url
-                AND latest_visits.latest_visit = history_visits.visited_at
-            LEFT JOIN favicons
-                ON favicons.origin = history_visits.origin
-            GROUP BY history_visits.url
-            ORDER BY latest_visits.latest_visit DESC
-            LIMIT ?
-            """
-        ) { statement in
-            try statement.bind(Int64(limit), at: 1)
-
-            var entries: [StoredHistoryEntry] = []
-            while try statement.step() == SQLite.row {
-                guard let rawURL = statement.text(at: 0),
-                      let url = URL(string: rawURL) else {
-                    continue
-                }
-
-                entries.append(
-                    StoredHistoryEntry(
-                        title: statement.text(at: 1) ?? url.host() ?? rawURL,
-                        url: url,
-                        lastVisitedAt: Date(timeIntervalSince1970: statement.double(at: 2)),
-                        visitCount: Int(statement.int64(at: 3)),
-                        faviconData: statement.data(at: 4)
-                    )
-                )
-            }
-
-            return entries
-        }
-    }
 
     func loadRecentHistoryVisits(limit: Int) throws -> [StoredHistoryVisit] {
         try withStatement(

@@ -40,6 +40,36 @@ enum BrowserNavigation {
         return searchEngine.searchURL(for: trimmed)
     }
 
+    static func bookmarkURL(from address: String) -> URL? {
+        let trimmed = address.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !trimmed.isEmpty else {
+            return nil
+        }
+
+        if let internalURL = BrowserInternalPage.url(from: trimmed) {
+            return internalURL
+        }
+
+        if trimmed.contains("://"),
+           let url = URL(string: trimmed),
+           isAllowedNavigationURL(url),
+           url.host()?.isEmpty == false {
+            return url
+        }
+
+        guard !trimmed.contains(where: \.isWhitespace),
+              let parsedComponents = URLComponents(string: "https://\(trimmed)"),
+              let host = parsedComponents.host,
+              host.contains(".") || isLocalHost(host),
+              let url = urlForSchemlessAddress(trimmed, host: host),
+              isAllowedNavigationURL(url) else {
+            return nil
+        }
+
+        return url
+    }
+
     private static func urlForSchemlessAddress(_ address: String, host: String) -> URL? {
         let scheme = isLocalHost(host) ? "http" : "https"
 

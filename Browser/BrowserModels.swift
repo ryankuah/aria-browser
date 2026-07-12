@@ -230,24 +230,6 @@ enum BrowserAppearance {
     static let accentColorHex = "#000000"
 }
 
-struct BrowserHistoryEntry: Identifiable, Equatable {
-    var id: String { url.absoluteString }
-
-    var title: String
-    var url: URL
-    var lastVisitedAt: Date
-    var visitCount: Int
-    var favicon: NSImage?
-
-    var displayTitle: String {
-        browserDisplayTitle(title, url: url)
-    }
-
-    var displayURL: String {
-        BrowserNavigation.displayAddressText(for: url)
-    }
-}
-
 struct BrowserHistoryVisit: Identifiable, Equatable {
     let id: Int64
     var title: String

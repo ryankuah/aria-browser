@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Foundation
 import Security
 import SwiftUI
@@ -10,10 +11,11 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
     private static let recentlyClosedTabLimit = 20
     private static let passwordAutofillSettingKey = "passwordAutofillEnabled"
     private static let passwordSavePromptSettingKey = "passwordSavePromptEnabled"
+    private static let downloadQuarantineRemovalSettingKey = "downloadQuarantineRemovalEnabled"
+    private static let quarantineAttributeName = "com.apple.quarantine"
 
     @Published private(set) var tabs: [BrowserTab] = []
     @Published private(set) var bookmarks: [BrowserBookmark] = []
-    @Published private(set) var historyEntries: [BrowserHistoryEntry] = []
     @Published private(set) var historyVisits: [BrowserHistoryVisit] = []
     @Published private(set) var historyJourneys: [BrowserHistoryJourney] = []
     @Published private(set) var autocompleteSites: [BrowserAutocompleteSite] = []
@@ -33,6 +35,7 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
     @Published private(set) var searchEngine: BrowserSearchEngine = .google
     @Published private(set) var isPasswordAutofillEnabled = true
     @Published private(set) var isPasswordSavePromptEnabled = true
+    @Published private(set) var isDownloadQuarantineRemovalEnabled = true
     @Published private(set) var userScripts: [BrowserUserScript] = []
     @Published private var mountRequestedTabIDs: Set<BrowserTab.ID> = []
     @Published private var tabStateRevision = 0
@@ -442,6 +445,18 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         persistSession()
     }
 
+    func promptToEditBookmarkURL(id: BrowserBookmark.ID) {
+        promptToEditBookmarkURL(id: id, draftURL: nil)
+    }
+
+    func copyBookmarkURL(id: BrowserBookmark.ID) {
+        guard let bookmark = bookmarks.first(where: { $0.id == id }) else {
+            return
+        }
+
+        copyToPasteboard(bookmark.url.absoluteString)
+    }
+
     func isTabBookmarked(id: BrowserTab.ID) -> Bool {
         if bookmarkID(owning: id) != nil {
             return true
@@ -678,10 +693,8 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
 
     func refreshHistoryEntries(limit: Int = 500) {
         Task { [weak self, persistence] in
-            async let entries = persistence.loadHistoryEntries(limit: limit)
             async let visits = persistence.loadHistoryVisits(limit: limit)
             async let treeNodes = persistence.loadHistoryTreeNodes(limit: limit)
-            await self?.applyHistoryEntries(entries)
             await self?.applyHistoryVisits(visits)
             await self?.applyHistoryTreeNodes(treeNodes)
         }
@@ -698,10 +711,6 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         }
     }
 
-    func openHistoryEntry(_ entry: BrowserHistoryEntry, inNewTab: Bool) {
-        openHistoryURL(entry.url, inNewTab: inNewTab)
-    }
-
     func openHistoryURL(_ url: URL, inNewTab: Bool) {
         if inNewTab {
             newTab(url: url)
@@ -710,10 +719,6 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         } else {
             newTab(url: url)
         }
-    }
-
-    func copyHistoryEntryURL(_ entry: BrowserHistoryEntry) {
-        copyHistoryURL(entry.url)
     }
 
     func copyHistoryURL(_ url: URL) {
@@ -855,6 +860,17 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         isPasswordSavePromptEnabled = isEnabled
         Task { [persistence] in
             await persistence.saveSetting(key: Self.passwordSavePromptSettingKey, value: isEnabled ? "true" : "false")
+        }
+    }
+
+    func setDownloadQuarantineRemovalEnabled(_ isEnabled: Bool) {
+        guard isDownloadQuarantineRemovalEnabled != isEnabled else {
+            return
+        }
+
+        isDownloadQuarantineRemovalEnabled = isEnabled
+        Task { [persistence] in
+            await persistence.saveSetting(key: Self.downloadQuarantineRemovalSettingKey, value: isEnabled ? "true" : "false")
         }
     }
 
@@ -1062,7 +1078,6 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         )
 
         let newWebView = BrowserWebView(frame: .zero, configuration: configuration)
-        newWebView.underPageBackgroundColor = .clear
 
         let newTab = makeTab(webView: newWebView)
         let sourceTabID = tab(for: webView)?.id
@@ -1260,6 +1275,10 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         if let rawPasswordSavePromptEnabled = settings[Self.passwordSavePromptSettingKey] {
             isPasswordSavePromptEnabled = Self.settingBool(rawPasswordSavePromptEnabled, defaultValue: true)
         }
+
+        if let rawDownloadQuarantineRemovalEnabled = settings[Self.downloadQuarantineRemovalSettingKey] {
+            isDownloadQuarantineRemovalEnabled = Self.settingBool(rawDownloadQuarantineRemovalEnabled, defaultValue: true)
+        }
     }
 
     private func applyUserScripts(_ storedScripts: [StoredBrowserUserScript]) {
@@ -1295,22 +1314,6 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         }
 
         mediaPermissionDecisionsByOrigin = decisionsByOrigin
-    }
-
-    private func applyHistoryEntries(_ storedEntries: [StoredHistoryEntry]) {
-        historyEntries = storedEntries.compactMap { storedEntry in
-            guard BrowserNavigation.isAllowedNavigationURL(storedEntry.url) else {
-                return nil
-            }
-
-            return BrowserHistoryEntry(
-                title: storedEntry.title,
-                url: storedEntry.url,
-                lastVisitedAt: storedEntry.lastVisitedAt,
-                visitCount: storedEntry.visitCount,
-                favicon: storedEntry.faviconData.flatMap(NSImage.init(data:))
-            )
-        }
     }
 
     private func applyHistoryVisits(_ storedVisits: [StoredHistoryVisit]) {
@@ -1957,6 +1960,11 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
     }
 
     func downloadDidFinish(_ download: WKDownload) {
+        let destinationURL = downloadIDsByDownload[ObjectIdentifier(download)].flatMap { id in
+            downloads.first(where: { $0.id == id })?.destinationURL
+        }
+
+        clearDownloadQuarantineIfNeeded(for: destinationURL)
         update(download) { item in
             item.status = .finished
             item.finishedAt = Date()
@@ -1983,6 +1991,54 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         refreshDownloadToast(download)
         persistDownload(download)
         removeActiveDownload(download)
+    }
+
+    private func clearDownloadQuarantineIfNeeded(for destinationURL: URL?) {
+        guard isDownloadQuarantineRemovalEnabled, let destinationURL else {
+            return
+        }
+
+        do {
+            try Self.removeQuarantineAttributeIfPresent(from: destinationURL)
+        } catch {
+            NSLog("Browser download quarantine removal failed for \(destinationURL.path): \(error.localizedDescription)")
+        }
+    }
+
+    private static func removeQuarantineAttributeIfPresent(from url: URL) throws {
+        try removeSingleQuarantineAttributeIfPresent(from: url)
+
+        guard (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true,
+              let enumerator = FileManager.default.enumerator(
+                at: url,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: []
+              ) else {
+            return
+        }
+
+        for case let childURL as URL in enumerator {
+            try removeSingleQuarantineAttributeIfPresent(from: childURL)
+        }
+    }
+
+    private static func removeSingleQuarantineAttributeIfPresent(from url: URL) throws {
+        try url.withUnsafeFileSystemRepresentation { path in
+            guard let path else {
+                throw CocoaError(.fileNoSuchFile)
+            }
+
+            guard removexattr(path, quarantineAttributeName, 0) == -1 else {
+                return
+            }
+
+            let code = errno
+            guard code != ENOATTR else {
+                return
+            }
+
+            throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+        }
     }
 
     private func update(_ download: WKDownload, mutate: (inout BrowserDownload) -> Void) {
@@ -2360,7 +2416,7 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
     }
 
     private func refreshHistoryMetadataIfNeeded() {
-        if historyEntries.isEmpty == false || historyVisits.isEmpty == false || historyJourneys.isEmpty == false {
+        if historyVisits.isEmpty == false || historyJourneys.isEmpty == false {
             refreshHistoryEntries()
         }
     }
@@ -2475,12 +2531,10 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
             return
         }
 
-        let snapshot = sessionSnapshot()
-
         sessionPersistenceTask?.cancel()
-        sessionPersistenceTask = Task { [persistence] in
+        sessionPersistenceTask = Task { [weak self, persistence] in
             try? await Task.sleep(for: .milliseconds(250))
-            guard !Task.isCancelled else {
+            guard !Task.isCancelled, let snapshot = self?.sessionSnapshot() else {
                 return
             }
             await persistence.saveSession(
@@ -2490,19 +2544,7 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         }
     }
 
-    private func persistSessionImmediately() {
-        let snapshot = sessionSnapshot()
-        Task { [persistence] in
-            await persistence.saveSession(
-                tabs: snapshot.tabs,
-                selectedTabID: snapshot.selectedTabID
-            )
-        }
-    }
-
     private func sessionSnapshot() -> (tabs: [BrowserTabSnapshot], selectedTabID: UUID?) {
-        syncOpenBookmarkTabs()
-
         let selectedBookmarkID = selectedTabID.flatMap(bookmarkID(owning:))
         let sessionTabs = tabs.filter { bookmarkID(owning: $0.id) == nil }
         let persistedSelectedTabID = selectedBookmarkID
@@ -2536,7 +2578,7 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
             )
             await MainActor.run {
                 self?.refreshAutocompleteData()
-                if self?.historyEntries.isEmpty == false || self?.historyVisits.isEmpty == false || self?.historyJourneys.isEmpty == false {
+                if self?.historyVisits.isEmpty == false || self?.historyJourneys.isEmpty == false {
                     self?.refreshHistoryEntries()
                 }
             }
@@ -2555,8 +2597,100 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         }
     }
 
-    private func syncOpenBookmarkTabs() {
-        tabs.forEach { syncBookmark(for: $0) }
+    private func promptToEditBookmarkURL(id: BrowserBookmark.ID, draftURL: String?) {
+        guard let bookmark = bookmarks.first(where: { $0.id == id }) else {
+            return
+        }
+
+        let textField = NSTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
+        textField.stringValue = draftURL ?? bookmark.url.absoluteString
+        textField.placeholderString = "https://example.com"
+
+        let alert = NSAlert()
+        alert.messageText = "Edit Bookmark URL"
+        alert.informativeText = bookmark.displayTitle
+        alert.accessoryView = textField
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+
+        let window = activeTab?.webView.window ?? NSApp.keyWindow
+        runAlert(alert, attachedTo: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else {
+                return
+            }
+
+            self?.saveEditedBookmarkURL(
+                id: id,
+                address: textField.stringValue,
+                attachedTo: window
+            )
+        }
+    }
+
+    private func saveEditedBookmarkURL(id: BrowserBookmark.ID, address: String, attachedTo window: NSWindow?) {
+        guard let url = BrowserNavigation.bookmarkURL(from: address) else {
+            presentBookmarkURLError(
+                message: "Enter a valid HTTP or HTTPS URL.",
+                id: id,
+                draftURL: address,
+                attachedTo: window
+            )
+            return
+        }
+
+        guard !bookmarks.contains(where: {
+            $0.id != id && BrowserNavigation.isSameBookmarkPage($0.url, url)
+        }) else {
+            presentBookmarkURLError(
+                message: "That page is already bookmarked.",
+                id: id,
+                draftURL: address,
+                attachedTo: window
+            )
+            return
+        }
+
+        guard let bookmarkIndex = bookmarks.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+
+        if bookmarks[bookmarkIndex].url == url {
+            return
+        }
+
+        bookmarkFaviconTasks[id]?.cancel()
+        bookmarkFaviconTasks.removeValue(forKey: id)
+        bookmarks[bookmarkIndex].url = url
+        bookmarks[bookmarkIndex].favicon = nil
+
+        let bookmark = bookmarks[bookmarkIndex]
+        persistBookmark(bookmark, position: bookmarkIndex)
+
+        if let tabID = bookmark.tabID,
+           let tab = tabs.first(where: { $0.id == tabID }) {
+            load(url, in: tab)
+        } else {
+            loadBookmarkFaviconIfNeeded(bookmark)
+        }
+
+        persistSession()
+    }
+
+    private func presentBookmarkURLError(
+        message: String,
+        id: BrowserBookmark.ID,
+        draftURL: String,
+        attachedTo window: NSWindow?
+    ) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Unable to Update Bookmark"
+        alert.informativeText = message
+        alert.addButton(withTitle: "OK")
+
+        runAlert(alert, attachedTo: window) { [weak self] _ in
+            self?.promptToEditBookmarkURL(id: id, draftURL: draftURL)
+        }
     }
 
     @discardableResult

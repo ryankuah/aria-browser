@@ -27,14 +27,6 @@ struct StoredBrowserBookmark: Sendable {
     let url: URL
 }
 
-struct StoredHistoryEntry: Sendable {
-    let title: String
-    let url: URL
-    let lastVisitedAt: Date
-    let visitCount: Int
-    let faviconData: Data?
-}
-
 struct StoredHistoryVisit: Sendable, Identifiable {
     let id: Int64
     let title: String

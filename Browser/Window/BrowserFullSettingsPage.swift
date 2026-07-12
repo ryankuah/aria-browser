@@ -121,6 +121,14 @@ struct BrowserFullSettingsPage: View {
 
                         Spacer(minLength: 0)
                     }
+
+                    FullSettingsPreferenceRow(
+                        title: "Remove Download Quarantine",
+                        systemName: "shield.slash",
+                        isOn: browser.isDownloadQuarantineRemovalEnabled
+                    ) {
+                        browser.setDownloadQuarantineRemovalEnabled(!browser.isDownloadQuarantineRemovalEnabled)
+                    }
                 }
             }
         }

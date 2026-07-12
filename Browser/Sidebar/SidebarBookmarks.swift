@@ -137,6 +137,10 @@ struct BookmarkShelf: View {
                                 isSelected: browser.isBookmarkActive(id: bookmark.id)
                             ) {
                                 browser.openBookmark(id: bookmark.id)
+                            } onEditURL: {
+                                browser.promptToEditBookmarkURL(id: bookmark.id)
+                            } onCopyURL: {
+                                browser.copyBookmarkURL(id: bookmark.id)
                             } onUnpin: {
                                 browser.unpinBookmark(id: bookmark.id)
                             } onCloseTab: {
@@ -186,6 +190,8 @@ private struct BookmarkButton: View {
     let bookmark: BrowserBookmark
     let isSelected: Bool
     let action: () -> Void
+    let onEditURL: () -> Void
+    let onCopyURL: () -> Void
     let onUnpin: () -> Void
     let onCloseTab: () -> Void
 
@@ -213,7 +219,16 @@ private struct BookmarkButton: View {
         }
         .cursor(.pointingHand)
         .contextMenu {
-            Button("Unpin", action: onUnpin)
+            Button("Open Bookmark", action: action)
+
+            Divider()
+
+            Button("Edit URL…", action: onEditURL)
+            Button("Copy URL", action: onCopyURL)
+
+            Divider()
+
+            Button("Remove Bookmark", role: .destructive, action: onUnpin)
 
             if bookmark.tabID != nil {
                 Divider()
