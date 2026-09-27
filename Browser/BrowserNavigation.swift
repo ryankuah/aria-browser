@@ -88,6 +88,15 @@ enum BrowserNavigation {
         return allowedURLSchemes.contains(scheme) || BrowserInternalPage.page(for: url) != nil
     }
 
+    static func invalidPort(in url: URL) -> Int? {
+        guard let port = url.port,
+              !(1...65_535).contains(port) else {
+            return nil
+        }
+
+        return port
+    }
+
     static func isInternalPageURL(_ url: URL?) -> Bool {
         BrowserInternalPage.page(for: url) != nil
     }

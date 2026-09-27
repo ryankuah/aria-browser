@@ -36,6 +36,15 @@ struct DownloadsFooter: View {
             HStack {
                 Spacer()
 
+                ForEach(browser.userScriptSidebarItems) { item in
+                    SidebarIconButton(
+                        systemName: item.systemName,
+                        label: item.label
+                    ) {
+                        browser.performUserScriptSidebarAction(id: item.id)
+                    }
+                }
+
                 SidebarIconButton(
                     systemName: "clock.arrow.circlepath",
                     label: "History"

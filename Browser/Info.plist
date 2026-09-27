@@ -6,6 +6,8 @@
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleDisplayName</key>
+	<string>Aria</string>
 	<key>CFBundleIdentifier</key>
 	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 	<key>CFBundleInfoDictionaryVersion</key>
@@ -20,7 +22,7 @@
 			<key>CFBundleTypeRole</key>
 			<string>Editor</string>
 			<key>CFBundleURLName</key>
-			<string>Browser Internal Pages</string>
+			<string>Aria Internal Pages</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>browser</string>
@@ -47,8 +49,8 @@
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.productivity</string>
 	<key>NSCameraUsageDescription</key>
-	<string>Browser needs camera access for websites you allow.</string>
+	<string>Aria needs camera access for websites you allow.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Browser needs microphone access for websites you allow.</string>
+	<string>Aria needs microphone access for websites you allow.</string>
 </dict>
 </plist>

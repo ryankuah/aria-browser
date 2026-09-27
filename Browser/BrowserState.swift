@@ -9,6 +9,8 @@ import WebKit
 final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDelegate {
     private static let consoleMessageLimit = 500
     private static let recentlyClosedTabLimit = 20
+    private static let pendingAutofillUsernameLifetime: TimeInterval = 10 * 60
+    private static let userScriptFileMigrationSettingKey = "userScriptFileMigrationCompleted"
     private static let passwordAutofillSettingKey = "passwordAutofillEnabled"
     private static let passwordSavePromptSettingKey = "passwordSavePromptEnabled"
     private static let downloadQuarantineRemovalSettingKey = "downloadQuarantineRemovalEnabled"
@@ -43,8 +45,11 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
     @Published private(set) var isElementFullscreenActive = false
 
     private let persistence = BrowserPersistenceStore()
+    private let userScriptBridgeToken = UUID().uuidString
     private var startupLoadTask: Task<Void, Never>?
     private var sessionPersistenceTask: Task<Void, Never>?
+    private var userScriptWatcherTask: Task<Void, Never>?
+    private var userScriptDirectorySignature: String?
     private var mountedTabIDs: Set<BrowserTab.ID> = []
     private var pendingTabLoads: [BrowserTab.ID: URL] = [:]
     private var bookmarkFaviconTasks: [BrowserBookmark.ID: Task<Void, Never>] = [:]
@@ -52,10 +57,12 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
     private var activeDownloadProgressObservations: [BrowserDownload.ID: [NSKeyValueObservation]] = [:]
     private var activeDownloadProgressSnapshots: [BrowserDownload.ID: (receivedBytes: Int64, date: Date)] = [:]
     private var downloadIDsByDownload: [ObjectIdentifier: BrowserDownload.ID] = [:]
+    private var destinationDirectoriesByDownload: [ObjectIdentifier: URL] = [:]
     private var toastIDsByDownloadID: [BrowserDownload.ID: BrowserToast.ID] = [:]
     private var mediaPermissionRequests: [BrowserToast.ID: BrowserMediaPermissionRequest] = [:]
     private var externalApplicationPromptURLs: Set<String> = []
     private var credentialSaveRequests: [BrowserToast.ID: BrowserCredentialSaveRequest] = [:]
+    private var pendingAutofillUsernames: [BrowserAutofillContext: PendingAutofillUsername] = [:]
     private var promptedAutofillFormKeys: Set<String> = []
     private var filledAutofillFormKeys: Set<String> = []
     private var toastDismissalTasks: [BrowserToast.ID: Task<Void, Never>] = [:]
@@ -66,6 +73,7 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
     private var historyURLByTabID: [BrowserTab.ID: String] = [:]
     private var historyRecordTasksByTabID: [BrowserTab.ID: Task<Void, Never>] = [:]
     private var historyCursorSourceByTabID: [BrowserTab.ID: BrowserTab.ID] = [:]
+    private var parentTabIDByTabID: [BrowserTab.ID: BrowserTab.ID] = [:]
 
     var activeTab: BrowserTab? {
         tabs.first { $0.id == selectedTabID }
@@ -139,6 +147,21 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         return path
     }
 
+    var userScriptsDirectoryDisplayPath: String {
+        let path = (try? BrowserUserScriptStore.directoryURL().path) ?? "Userscripts"
+        let homePath = FileManager.default.homeDirectoryForCurrentUser.path
+
+        if path.hasPrefix(homePath + "/") {
+            return "~" + path.dropFirst(homePath.count)
+        }
+
+        return path
+    }
+
+    var userScriptSidebarItems: [BrowserUserScriptSidebarItem] {
+        userScripts.compactMap(\.sidebarItem)
+    }
+
     func openDownloadsFolder() {
         NSWorkspace.shared.activateFileViewerSelecting([Self.downloadsDirectory])
     }
@@ -156,6 +179,7 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
     deinit {
         startupLoadTask?.cancel()
         sessionPersistenceTask?.cancel()
+        userScriptWatcherTask?.cancel()
         bookmarkFaviconTasks.values.forEach { $0.cancel() }
         historyRecordTasksByTabID.values.forEach { $0.cancel() }
         historyCursorSourceByTabID.removeAll()
@@ -165,6 +189,14 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
 
     func newTab(url: URL? = nil) {
         _ = createTab(url: url, persist: true)
+    }
+
+    func openInternalPage(_ page: BrowserInternalPage) {
+        _ = createTab(
+            url: page.url,
+            persist: true,
+            parentTabID: selectedTabID
+        )
     }
 
     func openExternalURL(_ url: URL) {
@@ -208,10 +240,18 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
     }
 
     @discardableResult
-    private func createTab(url: URL?, persist: Bool) -> BrowserTab {
+    private func createTab(
+        url: URL?,
+        persist: Bool,
+        parentTabID: BrowserTab.ID? = nil
+    ) -> BrowserTab {
         let sourceTabID = selectedTabID
         let tab = makeTab(url: url)
         historyCursorByTabID[tab.id] = BrowserHistoryCursor(journeyID: UUID())
+        if let parentTabID,
+           tabs.contains(where: { $0.id == parentTabID }) {
+            parentTabIDByTabID[tab.id] = parentTabID
+        }
         insertTab(tab, after: sourceTabID)
         selectedTabID = tab.id
 
@@ -231,9 +271,12 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
             return
         }
 
-        rememberClosedTab(tabs[index], position: index)
+        let closingTab = tabs[index]
+        rememberClosedTab(closingTab, position: index)
+        closingTab.prepareForClose()
 
         let wasSelected = selectedTabID == id
+        let parentTabID = parentTabIDByTabID.removeValue(forKey: id)
         mountRequestedTabIDs.remove(id)
         mountedTabIDs.remove(id)
         pendingTabLoads.removeValue(forKey: id)
@@ -242,11 +285,17 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         historyRecordTasksByTabID.removeValue(forKey: id)?.cancel()
         historyCursorSourceByTabID.removeValue(forKey: id)
         clearBookmarkTabBinding(for: id)
+        removePendingAutofillUsernames(for: tabs[index].webView)
 
         tabs.remove(at: index)
 
         if wasSelected {
-            selectedTabID = replacementSelectedTabID(closedIndex: index)
+            if let parentTabID,
+               tabs.contains(where: { $0.id == parentTabID }) {
+                selectedTabID = parentTabID
+            } else {
+                selectedTabID = replacementSelectedTabID(closedIndex: index)
+            }
         }
 
         refreshElementFullscreenState()
@@ -266,8 +315,12 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
             return
         }
 
-        let tab = makeTab(title: closedTab.title, url: closedTab.url)
+        let tab = makeTab(id: closedTab.id, title: closedTab.title, url: closedTab.url)
         historyCursorByTabID[tab.id] = BrowserHistoryCursor(journeyID: UUID())
+        if let parentTabID = closedTab.parentTabID {
+            parentTabIDByTabID[tab.id] = parentTabID
+        }
+
         let insertionIndex = min(closedTab.position, tabs.count)
         tabs.insert(tab, at: insertionIndex)
         selectedTabID = tab.id
@@ -496,12 +549,15 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
     func webViewDidMount(for tabID: BrowserTab.ID) {
         mountedTabIDs.insert(tabID)
 
-        guard let url = pendingTabLoads.removeValue(forKey: tabID),
-              let tab = tabs.first(where: { $0.id == tabID }) else {
+        guard let tab = tabs.first(where: { $0.id == tabID }) else {
             return
         }
 
-        load(url, in: tab)
+        tab.startMediaPlaybackMonitoring()
+
+        if let url = pendingTabLoads.removeValue(forKey: tabID) {
+            load(url, in: tab)
+        }
     }
 
     func goBack() {
@@ -551,6 +607,10 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         activeTab?.clearFindSelection()
     }
 
+    func toggleMuteTab(id: BrowserTab.ID) {
+        tabs.first(where: { $0.id == id })?.toggleMuted()
+    }
+
     func clearConsoleMessages() {
         consoleMessages = []
     }
@@ -574,6 +634,15 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         )
     }
 
+    func receiveMediaStateMessage(_ body: Any, webView: BrowserWebView?, frameInfo: WKFrameInfo) {
+        guard let webView,
+              let tab = tabs.first(where: { $0.webView === webView }) else {
+            return
+        }
+
+        tab.receiveMediaState(body, frameInfo: frameInfo)
+    }
+
     func receiveAutofillMessage(_ body: Any, webView: BrowserWebView?, frameInfo: WKFrameInfo) {
         guard let webView,
               let payload = body as? [String: Any],
@@ -587,10 +656,12 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         }
 
         switch messageType {
+        case "usernameSubmitted":
+            handleAutofillUsernameSubmitted(payload, webView: webView, origin: frameOrigin)
         case "formDetected":
             handleAutofillFormDetected(payload, webView: webView, frameInfo: frameInfo, origin: frameOrigin)
         case "credentialsSubmitted":
-            handleAutofillCredentialsSubmitted(payload, origin: frameOrigin)
+            handleAutofillCredentialsSubmitted(payload, webView: webView, origin: frameOrigin)
         default:
             return
         }
@@ -874,104 +945,107 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         }
     }
 
-    @discardableResult
-    func createUserScript(
-        name: String,
-        matchPatterns: String,
-        source: String,
-        isEnabled: Bool,
-        injectionTime: BrowserUserScriptInjectionTime,
-        forMainFrameOnly: Bool
-    ) -> BrowserUserScript.ID? {
-        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedSource = source.trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalizedPatterns = Self.normalizedUserScriptMatchPatterns(matchPatterns)
-        guard !trimmedName.isEmpty,
-              !trimmedSource.isEmpty,
-              !normalizedPatterns.isEmpty else {
-            return nil
-        }
-
-        let script = BrowserUserScript(
-            id: UUID(),
-            name: trimmedName,
-            matchPatterns: normalizedPatterns,
-            source: source,
-            isEnabled: isEnabled,
-            injectionTime: injectionTime,
-            forMainFrameOnly: forMainFrameOnly,
-            position: userScripts.count
-        )
-        userScripts.append(script)
-        persistUserScript(script)
-        applyUserScriptsToOpenTabs(reloadPages: true)
-        return script.id
-    }
-
-    func updateUserScript(
-        id: BrowserUserScript.ID,
-        name: String,
-        matchPatterns: String,
-        source: String,
-        isEnabled: Bool,
-        injectionTime: BrowserUserScriptInjectionTime,
-        forMainFrameOnly: Bool
-    ) {
-        guard let index = userScripts.firstIndex(where: { $0.id == id }) else {
-            return
-        }
-
-        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedSource = source.trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalizedPatterns = Self.normalizedUserScriptMatchPatterns(matchPatterns)
-        guard !trimmedName.isEmpty,
-              !trimmedSource.isEmpty,
-              !normalizedPatterns.isEmpty else {
-            return
-        }
-
-        userScripts[index].name = trimmedName
-        userScripts[index].matchPatterns = normalizedPatterns
-        userScripts[index].source = source
-        userScripts[index].isEnabled = isEnabled
-        userScripts[index].injectionTime = injectionTime
-        userScripts[index].forMainFrameOnly = forMainFrameOnly
-        let script = userScripts[index]
-
-        persistUserScript(script)
-        applyUserScriptsToOpenTabs(reloadPages: true)
-    }
-
     func setUserScriptEnabled(id: BrowserUserScript.ID, isEnabled: Bool) {
-        guard let index = userScripts.firstIndex(where: { $0.id == id }),
-              userScripts[index].isEnabled != isEnabled else {
+        guard let script = userScripts.first(where: { $0.id == id }),
+              script.isEnabled != isEnabled else {
             return
         }
 
-        userScripts[index].isEnabled = isEnabled
-        let script = userScripts[index]
-        persistUserScript(script)
-        applyUserScriptsToOpenTabs(reloadPages: true)
+        do {
+            try BrowserUserScriptStore.setEnabled(isEnabled, for: script)
+            reloadUserScriptsFromDisk(reloadPages: true)
+        } catch {
+            NSLog("Browser user script update failed: \(error.localizedDescription)")
+        }
     }
 
-    func deleteUserScript(id: BrowserUserScript.ID) {
-        guard let index = userScripts.firstIndex(where: { $0.id == id }) else {
+    func openUserScriptsFolder() {
+        do {
+            _ = try BrowserUserScriptStore.loadScripts()
+            NSWorkspace.shared.open(try BrowserUserScriptStore.directoryURL())
+        } catch {
+            NSLog("Browser userscripts folder open failed: \(error.localizedDescription)")
+        }
+    }
+
+    func copyUserScriptsDirectoryPath() {
+        guard let directoryURL = try? BrowserUserScriptStore.directoryURL() else {
             return
         }
 
-        userScripts.remove(at: index)
-        for scriptIndex in userScripts.indices {
-            userScripts[scriptIndex].position = scriptIndex
+        copyToPasteboard(directoryURL.path)
+    }
+
+    func revealUserScript(id: BrowserUserScript.ID) {
+        guard let script = userScripts.first(where: { $0.id == id }) else {
+            return
         }
 
-        let remainingScripts = userScripts
-        Task { [persistence] in
-            await persistence.deleteUserScriptAndReindex(
-                id: id,
-                remainingScripts: remainingScripts.map(Self.storedUserScript(from:))
-            )
+        NSWorkspace.shared.activateFileViewerSelecting([script.fileURL])
+    }
+
+    func refreshUserScripts() {
+        reloadUserScriptsFromDisk(reloadPages: true)
+    }
+
+    func performUserScriptSidebarAction(id: BrowserUserScript.ID) {
+        guard userScripts.contains(where: { $0.id == id && $0.sidebarItem != nil }),
+              let webView = activeTab?.webView,
+              let eventNameData = try? JSONEncoder().encode(
+                BrowserUserScript.sidebarActionEventName(bridgeToken: userScriptBridgeToken)
+              ),
+              let eventName = String(data: eventNameData, encoding: .utf8),
+              let idData = try? JSONEncoder().encode(id),
+              let scriptID = String(data: idData, encoding: .utf8) else {
+            return
         }
-        applyUserScriptsToOpenTabs(reloadPages: true)
+
+        webView.evaluateJavaScript(
+            "window.dispatchEvent(new CustomEvent(\(eventName), { detail: { id: \(scriptID) } }));",
+            in: nil,
+            in: .defaultClient,
+            completionHandler: nil
+        )
+    }
+
+    func receiveUserScriptMessage(
+        _ body: Any,
+        webView: BrowserWebView?,
+        frameInfo: WKFrameInfo
+    ) {
+        guard let payload = body as? [String: Any],
+              payload["action"] as? String == "download",
+              payload["token"] as? String == userScriptBridgeToken,
+              let scriptID = payload["scriptID"] as? String,
+              userScripts.contains(where: { $0.id == scriptID && $0.isRunnable }),
+              let webView,
+              tabs.contains(where: { $0.webView === webView }),
+              let rawURLs = payload["urls"] as? [String] else {
+            return
+        }
+
+        var seenURLs: Set<String> = []
+        let urls = rawURLs.prefix(500).compactMap { rawURL -> URL? in
+            guard let url = URL(string: rawURL),
+                  BrowserNavigation.isAllowedDownloadURL(url),
+                  seenURLs.insert(url.absoluteString).inserted else {
+                return nil
+            }
+            return url
+        }
+        guard !urls.isEmpty else {
+            return
+        }
+
+        let destinationDirectory = (payload["folderName"] as? String)
+            .flatMap(createUniqueDownloadDirectory)
+
+        startUserScriptDownloads(
+            urls,
+            in: webView,
+            referringURL: frameInfo.request.url ?? webView.url,
+            destinationDirectory: destinationDirectory
+        )
     }
 
     func toggleActivePageMediaPermission(_ kind: BrowserMediaDeviceKind) {
@@ -1071,10 +1145,21 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
     ) -> WKWebView? {
         configuration.userContentController.removeScriptMessageHandler(forName: "browserConsole")
         configuration.userContentController.removeScriptMessageHandler(forName: "browserAutofill", contentWorld: .defaultClient)
+        configuration.userContentController.removeScriptMessageHandler(forName: "browserMedia")
+        configuration.userContentController.removeScriptMessageHandler(forName: "browserUserScript", contentWorld: .defaultClient)
         configuration.userContentController.add(
             BrowserAutofillScriptMessageHandler(browser: self),
             contentWorld: .defaultClient,
             name: "browserAutofill"
+        )
+        configuration.userContentController.add(
+            BrowserMediaScriptMessageHandler(browser: self),
+            name: "browserMedia"
+        )
+        configuration.userContentController.add(
+            BrowserUserScriptMessageHandler(browser: self),
+            contentWorld: .defaultClient,
+            name: "browserUserScript"
         )
 
         let newWebView = BrowserWebView(frame: .zero, configuration: configuration)
@@ -1083,6 +1168,7 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         let sourceTabID = tab(for: webView)?.id
         if let sourceTabID {
             historyCursorSourceByTabID[newTab.id] = sourceTabID
+            parentTabIDByTabID[newTab.id] = sourceTabID
         } else {
             historyCursorByTabID[newTab.id] = BrowserHistoryCursor(journeyID: UUID())
         }
@@ -1228,7 +1314,13 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         isApplyingStoredState = true
 
         applySettings(startupData.settings)
-        applyUserScripts(startupData.userScripts)
+        applyUserScripts(
+            startupData.userScripts,
+            hasCompletedFileMigration: Self.settingBool(
+                startupData.settings[Self.userScriptFileMigrationSettingKey] ?? "false",
+                defaultValue: false
+            )
+        )
         applyLoginCredentials(startupData.loginCredentials)
         applyMediaPermissionDecisions(startupData.mediaPermissionDecisions)
         downloads = startupData.downloads
@@ -1281,18 +1373,29 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         }
     }
 
-    private func applyUserScripts(_ storedScripts: [StoredBrowserUserScript]) {
-        userScripts = storedScripts.map { storedScript in
-            BrowserUserScript(
-                id: storedScript.id,
-                name: storedScript.name,
-                matchPatterns: storedScript.matchPatterns,
-                source: storedScript.source,
-                isEnabled: storedScript.isEnabled,
-                injectionTime: BrowserUserScriptInjectionTime(rawValue: storedScript.injectionTime) ?? .documentEnd,
-                forMainFrameOnly: storedScript.forMainFrameOnly,
-                position: storedScript.position
+    private func applyUserScripts(
+        _ storedScripts: [StoredBrowserUserScript],
+        hasCompletedFileMigration: Bool
+    ) {
+        do {
+            let result = try BrowserUserScriptStore.prepareAndLoad(
+                legacyScripts: storedScripts,
+                shouldExportLegacyScripts: !hasCompletedFileMigration
             )
+            userScripts = result.scripts
+            userScriptDirectorySignature = try? BrowserUserScriptStore.directorySignature()
+            startUserScriptWatcher()
+
+            if !hasCompletedFileMigration {
+                Task { [persistence] in
+                    await persistence.completeUserScriptFileMigration(
+                        settingKey: Self.userScriptFileMigrationSettingKey
+                    )
+                }
+            }
+        } catch {
+            userScripts = []
+            NSLog("Browser userscript load failed: \(error.localizedDescription)")
         }
     }
 
@@ -1486,6 +1589,8 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         historyRecordTasksByTabID.values.forEach { $0.cancel() }
         historyRecordTasksByTabID.removeAll()
         historyCursorSourceByTabID.removeAll()
+        parentTabIDByTabID.removeAll()
+        pendingAutofillUsernames.removeAll()
         recentlyClosedTabs.removeAll()
         tabs = []
         bookmarks = []
@@ -1507,6 +1612,8 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
                 on: webView.configuration.userContentController,
                 includeConsoleBridge: false,
                 includeAutofillBridge: true,
+                includeMediaBridge: true,
+                userScriptBridgeToken: userScriptBridgeToken,
                 userScripts: userScripts
             )
         } else {
@@ -1554,16 +1661,11 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
             configuration,
             consoleMessageHandler: BrowserConsoleScriptMessageHandler(browser: self),
             autofillMessageHandler: BrowserAutofillScriptMessageHandler(browser: self),
+            mediaMessageHandler: BrowserMediaScriptMessageHandler(browser: self),
+            userScriptMessageHandler: BrowserUserScriptMessageHandler(browser: self),
+            userScriptBridgeToken: userScriptBridgeToken,
             userScripts: userScripts
         )
-    }
-
-    private static func normalizedUserScriptMatchPatterns(_ rawValue: String) -> String {
-        rawValue
-            .components(separatedBy: CharacterSet(charactersIn: "\n,"))
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-            .joined(separator: "\n")
     }
 
     private static func settingBool(_ rawValue: String, defaultValue: Bool) -> Bool {
@@ -1596,36 +1698,54 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         )
     }
 
-    nonisolated private static func storedUserScript(from script: BrowserUserScript) -> StoredBrowserUserScript {
-        StoredBrowserUserScript(
-            id: script.id,
-            position: script.position,
-            name: script.name,
-            matchPatterns: script.matchPatterns,
-            source: script.source,
-            isEnabled: script.isEnabled,
-            injectionTime: script.injectionTime.rawValue,
-            forMainFrameOnly: script.forMainFrameOnly
-        )
-    }
-
-    private func persistUserScript(_ script: BrowserUserScript) {
-        Task { [persistence] in
-            await persistence.saveUserScript(Self.storedUserScript(from: script))
-        }
-    }
-
     private func applyUserScriptsToOpenTabs(reloadPages: Bool) {
         for tab in tabs {
             BrowserWebView.replaceConfiguredUserScripts(
                 on: tab.webView.configuration.userContentController,
                 includeConsoleBridge: true,
                 includeAutofillBridge: true,
+                includeMediaBridge: true,
+                userScriptBridgeToken: userScriptBridgeToken,
                 userScripts: userScripts
             )
 
             if reloadPages, tab.webView.url != nil {
                 tab.webView.reload()
+            }
+        }
+    }
+
+    private func reloadUserScriptsFromDisk(reloadPages: Bool) {
+        do {
+            let scripts = try BrowserUserScriptStore.loadScripts()
+            userScriptDirectorySignature = try? BrowserUserScriptStore.directorySignature()
+            guard scripts != userScripts else {
+                return
+            }
+
+            userScripts = scripts
+            applyUserScriptsToOpenTabs(reloadPages: reloadPages)
+        } catch {
+            NSLog("Browser userscript reload failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func startUserScriptWatcher() {
+        guard userScriptWatcherTask == nil else {
+            return
+        }
+
+        userScriptWatcherTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard !Task.isCancelled, let self else {
+                    return
+                }
+
+                let signature = try? BrowserUserScriptStore.directorySignature()
+                if signature != self.userScriptDirectorySignature {
+                    self.reloadUserScriptsFromDisk(reloadPages: true)
+                }
             }
         }
     }
@@ -1641,7 +1761,10 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
             return
         }
 
-        let credentials = matchingLoginCredentials(for: origin)
+        let credentials = matchingLoginCredentials(
+            for: origin,
+            pendingUsername: pendingAutofillUsername(for: webView, origin: origin)
+        )
         guard !credentials.isEmpty else {
             return
         }
@@ -1665,15 +1788,43 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         promptForLoginCredentialFill(credentials, formID: formID, webView: webView, frameInfo: frameInfo, origin: origin)
     }
 
-    private func handleAutofillCredentialsSubmitted(_ payload: [String: Any], origin: BrowserCredentialOrigin) {
-        guard isPasswordSavePromptEnabled,
-              let username = Self.trimmedPayloadString("username", in: payload),
-              let password = Self.rawPayloadString("password", in: payload),
+    private func handleAutofillUsernameSubmitted(
+        _ payload: [String: Any],
+        webView: BrowserWebView,
+        origin: BrowserCredentialOrigin
+    ) {
+        guard let username = Self.trimmedPayloadString("username", in: payload) else {
+            return
+        }
+
+        pruneExpiredPendingAutofillUsernames()
+        pendingAutofillUsernames[autofillContext(webView: webView, origin: origin)] = PendingAutofillUsername(
+            username: username,
+            fieldName: Self.trimmedPayloadString("usernameFieldName", in: payload),
+            capturedAt: Date()
+        )
+    }
+
+    private func handleAutofillCredentialsSubmitted(
+        _ payload: [String: Any],
+        webView: BrowserWebView,
+        origin: BrowserCredentialOrigin
+    ) {
+        guard let password = Self.rawPayloadString("password", in: payload),
               !password.isEmpty else {
             return
         }
 
-        let usernameFieldName = Self.trimmedPayloadString("usernameFieldName", in: payload)
+        let context = autofillContext(webView: webView, origin: origin)
+        let pendingUsername = pendingAutofillUsername(for: webView, origin: origin)
+        let username = Self.trimmedPayloadString("username", in: payload) ?? pendingUsername?.username
+        pendingAutofillUsernames.removeValue(forKey: context)
+
+        guard isPasswordSavePromptEnabled, let username else {
+            return
+        }
+
+        let usernameFieldName = Self.trimmedPayloadString("usernameFieldName", in: payload) ?? pendingUsername?.fieldName
         let passwordFieldName = Self.trimmedPayloadString("passwordFieldName", in: payload)
         let existingCredential = loginCredentials.first {
             $0.origin == origin.origin && $0.username.caseInsensitiveCompare(username) == .orderedSame
@@ -1707,8 +1858,11 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         )
     }
 
-    private func matchingLoginCredentials(for origin: BrowserCredentialOrigin) -> [StoredLoginCredential] {
-        loginCredentials
+    private func matchingLoginCredentials(
+        for origin: BrowserCredentialOrigin,
+        pendingUsername: PendingAutofillUsername?
+    ) -> [StoredLoginCredential] {
+        let credentials = loginCredentials
             .filter { $0.origin == origin.origin }
             .sorted { left, right in
                 switch (left.lastUsedAt, right.lastUsedAt) {
@@ -1722,6 +1876,14 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
                     return left.updatedAt > right.updatedAt
                 }
             }
+
+        guard let pendingUsername else {
+            return credentials
+        }
+
+        return credentials.filter {
+            $0.username.caseInsensitiveCompare(pendingUsername.username) == .orderedSame
+        }
     }
 
     private func promptForLoginCredentialFill(
@@ -1811,6 +1973,14 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         password: String,
         isUpdate: Bool
     ) {
+        guard !credentialSaveRequests.values.contains(where: {
+            $0.credential.origin == credential.origin &&
+                $0.credential.username.caseInsensitiveCompare(credential.username) == .orderedSame &&
+                $0.password == password
+        }) else {
+            return
+        }
+
         let id = UUID()
         credentialSaveRequests[id] = BrowserCredentialSaveRequest(
             credential: credential,
@@ -1870,6 +2040,28 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         "\(ObjectIdentifier(webView).hashValue)|\(origin.origin)|\(formID)"
     }
 
+    private func autofillContext(webView: BrowserWebView, origin: BrowserCredentialOrigin) -> BrowserAutofillContext {
+        BrowserAutofillContext(webViewID: ObjectIdentifier(webView), origin: origin.origin)
+    }
+
+    private func pendingAutofillUsername(
+        for webView: BrowserWebView,
+        origin: BrowserCredentialOrigin
+    ) -> PendingAutofillUsername? {
+        pruneExpiredPendingAutofillUsernames()
+        return pendingAutofillUsernames[autofillContext(webView: webView, origin: origin)]
+    }
+
+    private func pruneExpiredPendingAutofillUsernames() {
+        let cutoff = Date().addingTimeInterval(-Self.pendingAutofillUsernameLifetime)
+        pendingAutofillUsernames = pendingAutofillUsernames.filter { $0.value.capturedAt >= cutoff }
+    }
+
+    private func removePendingAutofillUsernames(for webView: BrowserWebView) {
+        let webViewID = ObjectIdentifier(webView)
+        pendingAutofillUsernames = pendingAutofillUsernames.filter { $0.key.webViewID != webViewID }
+    }
+
     private static func autofillFillSucceeded(_ value: Any) -> Bool {
         if let boolValue = value as? Bool {
             return boolValue
@@ -1911,7 +2103,11 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         NSPasteboard.general.setString(value, forType: .string)
     }
 
-    private func begin(_ download: WKDownload, from sourceURL: URL?) {
+    private func begin(
+        _ download: WKDownload,
+        from sourceURL: URL?,
+        destinationDirectory: URL? = nil
+    ) {
         download.delegate = self
 
         let id = UUID()
@@ -1931,15 +2127,62 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
             ),
             at: 0
         )
-        attach(download, toExistingID: id)
+        attach(
+            download,
+            toExistingID: id,
+            destinationDirectory: destinationDirectory
+        )
         showDownloadToast(for: downloads[0])
         persistDownload(id: id)
     }
 
-    private func attach(_ download: WKDownload, toExistingID id: BrowserDownload.ID) {
+    private func startUserScriptDownloads(
+        _ urls: [URL],
+        in webView: BrowserWebView,
+        referringURL: URL?,
+        destinationDirectory: URL?
+    ) {
+        Task { @MainActor [weak self, weak webView] in
+            for url in urls {
+                guard let self, let webView else {
+                    return
+                }
+
+                var request = URLRequest(url: url)
+                request.setValue("image/avif,image/webp,image/*,*/*;q=0.8", forHTTPHeaderField: "Accept")
+                if let referringURL,
+                   referringURL.scheme == "http" || referringURL.scheme == "https" {
+                    request.setValue(referringURL.absoluteString, forHTTPHeaderField: "Referer")
+                }
+
+                webView.startDownload(using: request) { [weak self] download in
+                    guard let self else {
+                        return
+                    }
+                    self.begin(
+                        download,
+                        from: url,
+                        destinationDirectory: destinationDirectory
+                    )
+                }
+
+                try? await Task.sleep(for: .milliseconds(120))
+            }
+        }
+    }
+
+    private func attach(
+        _ download: WKDownload,
+        toExistingID id: BrowserDownload.ID,
+        destinationDirectory: URL? = nil
+    ) {
         download.delegate = self
         activeDownloads[id] = download
-        downloadIDsByDownload[ObjectIdentifier(download)] = id
+        let downloadObjectID = ObjectIdentifier(download)
+        downloadIDsByDownload[downloadObjectID] = id
+        if let destinationDirectory {
+            destinationDirectoriesByDownload[downloadObjectID] = destinationDirectory
+        }
         observeDownloadProgress(download, id: id)
     }
 
@@ -1949,7 +2192,11 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         suggestedFilename: String,
         completionHandler: @escaping @MainActor @Sendable (URL?) -> Void
     ) {
-        let destinationURL = uniqueDownloadURL(for: suggestedFilename)
+        let downloadObjectID = ObjectIdentifier(download)
+        let destinationURL = uniqueDownloadURL(
+            for: suggestedFilename,
+            in: destinationDirectoriesByDownload[downloadObjectID] ?? Self.downloadsDirectory
+        )
         update(download) { item in
             item.suggestedFilename = suggestedFilename
             item.destinationURL = destinationURL
@@ -2134,6 +2381,7 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         activeDownloads.removeValue(forKey: id)
         activeDownloadProgressObservations.removeValue(forKey: id)
         activeDownloadProgressSnapshots.removeValue(forKey: id)
+        destinationDirectoriesByDownload.removeValue(forKey: downloadObjectID)
     }
 
     private func showToast(_ toast: BrowserToast) {
@@ -2297,9 +2545,11 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         }
     }
 
-    private func uniqueDownloadURL(for suggestedFilename: String) -> URL {
+    private func uniqueDownloadURL(
+        for suggestedFilename: String,
+        in downloadsDirectory: URL
+    ) -> URL {
         let fileManager = FileManager.default
-        let downloadsDirectory = Self.downloadsDirectory
         let sanitizedName = sanitizedFilename(suggestedFilename.nonEmpty ?? "Download")
         let baseURL = downloadsDirectory.appendingPathComponent(sanitizedName, isDirectory: false)
 
@@ -2319,6 +2569,49 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         }
 
         return downloadsDirectory.appendingPathComponent("\(UUID().uuidString)-\(sanitizedName)", isDirectory: false)
+    }
+
+    private func createUniqueDownloadDirectory(named requestedName: String) -> URL? {
+        let fileManager = FileManager.default
+        let downloadsDirectory = Self.downloadsDirectory
+        let sanitizedName = String(
+            sanitizedFilename(requestedName.nonEmpty ?? "Downloaded Images")
+                .prefix(120)
+        )
+
+        do {
+            try fileManager.createDirectory(
+                at: downloadsDirectory,
+                withIntermediateDirectories: true
+            )
+        } catch {
+            NSLog("Browser could not prepare the Downloads directory: \(error.localizedDescription)")
+            return nil
+        }
+
+        for index in 1...999 {
+            let candidateName = index == 1 ? sanitizedName : "\(sanitizedName) \(index)"
+            let candidateURL = downloadsDirectory.appendingPathComponent(
+                candidateName,
+                isDirectory: true
+            )
+            guard !fileManager.fileExists(atPath: candidateURL.path) else {
+                continue
+            }
+
+            do {
+                try fileManager.createDirectory(
+                    at: candidateURL,
+                    withIntermediateDirectories: false
+                )
+                return candidateURL
+            } catch {
+                continue
+            }
+        }
+
+        NSLog("Browser could not create a unique folder for userscript downloads.")
+        return nil
     }
 
     private static var downloadsDirectory: URL {
@@ -2804,9 +3097,11 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
 
     private func rememberClosedTab(_ tab: BrowserTab, position: Int) {
         recentlyClosedTabs.append(RecentlyClosedTab(
-            title: tab.displayTitle,
-            url: tab.webView.url ?? tab.url,
-            position: position
+            id: tab.id,
+            title: tab.title,
+            url: pendingTabLoads[tab.id] ?? tab.url ?? tab.webView.url,
+            position: position,
+            parentTabID: parentTabIDByTabID[tab.id]
         ))
 
         if recentlyClosedTabs.count > Self.recentlyClosedTabLimit {
@@ -2959,9 +3254,12 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
 }
 
 private struct RecentlyClosedTab {
+    // Store only restoration details so closing a tab can release its web view.
+    let id: BrowserTab.ID
     let title: String
     let url: URL?
     let position: Int
+    let parentTabID: BrowserTab.ID?
 }
 
 private struct BrowserPendingHistoryRelationship {
@@ -3036,6 +3334,17 @@ private struct BrowserCredentialOrigin {
     var displayHost: String {
         host.removingWWWPrefix
     }
+}
+
+private struct BrowserAutofillContext: Hashable {
+    let webViewID: ObjectIdentifier
+    let origin: String
+}
+
+private struct PendingAutofillUsername {
+    let username: String
+    let fieldName: String?
+    let capturedAt: Date
 }
 
 private struct BrowserCredentialSaveRequest: Sendable {

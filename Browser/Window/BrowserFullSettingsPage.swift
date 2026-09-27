@@ -5,10 +5,6 @@ struct BrowserFullSettingsPage: View {
     @ObservedObject var browser: BrowserState
     let onClose: () -> Void
 
-    @State private var isAddingUserScript = false
-    @State private var editingUserScriptID: BrowserUserScript.ID?
-    @State private var userScriptDraft = FullSettingsUserScriptDraft()
-
     private let contentMaxWidth: CGFloat = 1120
     private let twoColumnThreshold: CGFloat = 860
 
@@ -197,54 +193,67 @@ struct BrowserFullSettingsPage: View {
     private var userScriptsCard: some View {
         SettingsCard(title: "User Scripts", systemName: "curlybraces") {
             VStack(alignment: .leading, spacing: 10) {
-                if browser.userScripts.isEmpty && !isAddingUserScript {
+                Text("JavaScript files in this folder are loaded automatically. Use userscript metadata for match rules, run timing, and optional sidebar buttons.")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack(spacing: 8) {
+                    Image(systemName: "folder")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 16)
+
+                    Text(browser.userScriptsDirectoryDisplayPath)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(.horizontal, 10)
+                .frame(height: 32)
+                .background {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.primary.opacity(0.05))
+                }
+
+                HStack(spacing: 8) {
+                    SettingsActionButton(title: "Open Folder", systemName: "arrow.up.forward.app") {
+                        browser.openUserScriptsFolder()
+                    }
+
+                    SettingsActionButton(title: "Reload", systemName: "arrow.clockwise") {
+                        browser.refreshUserScripts()
+                    }
+
+                    SettingsActionButton(title: "Copy Path", systemName: "doc.on.doc") {
+                        browser.copyUserScriptsDirectoryPath()
+                    }
+
+                    Spacer(minLength: 0)
+                }
+
+                SettingsRowDivider()
+
+                if browser.userScripts.isEmpty {
                     SettingsEmptyRow(
                         systemName: "curlybraces",
-                        message: "No user scripts yet. Add one to run custom JavaScript on pages you visit."
+                        message: "No .js files found in the Userscripts folder."
                     )
                 }
 
                 ForEach(browser.userScripts) { script in
                     FullSettingsUserScriptRow(
                         script: script,
-                        isEditing: editingUserScriptID == script.id,
                         onEnabledChange: { isEnabled in
                             browser.setUserScriptEnabled(id: script.id, isEnabled: isEnabled)
                         },
-                        onEdit: {
-                            startEditingUserScript(script)
-                        },
-                        onDelete: {
-                            deleteUserScript(script)
+                        onReveal: {
+                            browser.revealUserScript(id: script.id)
                         }
                     )
                 }
-
-                if isAddingUserScript || editingUserScript != nil {
-                    FullSettingsUserScriptEditor(
-                        title: isAddingUserScript ? "New Script" : "Edit Script",
-                        draft: $userScriptDraft,
-                        onSave: saveUserScriptDraft,
-                        onCancel: cancelUserScriptEditor
-                    )
-                    .transition(.move(edge: .top).combined(with: .opacity))
-                }
-
-                HStack {
-                    SettingsActionButton(
-                        title: isAddingUserScript ? "Cancel" : "Add Script",
-                        systemName: isAddingUserScript ? "xmark" : "plus"
-                    ) {
-                        if isAddingUserScript {
-                            cancelUserScriptEditor()
-                        } else {
-                            startAddingUserScript()
-                        }
-                    }
-
-                    Spacer(minLength: 0)
-                }
-                .padding(.top, 2)
             }
         }
     }
@@ -277,77 +286,6 @@ struct BrowserFullSettingsPage: View {
         .padding(.vertical, 12)
     }
 
-    private var editingUserScript: BrowserUserScript? {
-        guard let editingUserScriptID else {
-            return nil
-        }
-
-        return browser.userScripts.first { $0.id == editingUserScriptID }
-    }
-
-    private func startAddingUserScript() {
-        withAnimation(.easeInOut(duration: 0.14)) {
-            editingUserScriptID = nil
-            isAddingUserScript = true
-            userScriptDraft = FullSettingsUserScriptDraft()
-        }
-    }
-
-    private func startEditingUserScript(_ script: BrowserUserScript) {
-        withAnimation(.easeInOut(duration: 0.14)) {
-            isAddingUserScript = false
-            editingUserScriptID = script.id
-            userScriptDraft = FullSettingsUserScriptDraft(script: script)
-        }
-    }
-
-    private func cancelUserScriptEditor() {
-        withAnimation(.easeInOut(duration: 0.14)) {
-            isAddingUserScript = false
-            editingUserScriptID = nil
-            userScriptDraft = FullSettingsUserScriptDraft()
-        }
-    }
-
-    private func saveUserScriptDraft() {
-        guard userScriptDraft.canSave else {
-            return
-        }
-
-        if isAddingUserScript {
-            browser.createUserScript(
-                name: userScriptDraft.name,
-                matchPatterns: userScriptDraft.matchPatterns,
-                source: userScriptDraft.source,
-                isEnabled: userScriptDraft.isEnabled,
-                injectionTime: userScriptDraft.injectionTime,
-                forMainFrameOnly: userScriptDraft.forMainFrameOnly
-            )
-        } else if let editingUserScriptID {
-            browser.updateUserScript(
-                id: editingUserScriptID,
-                name: userScriptDraft.name,
-                matchPatterns: userScriptDraft.matchPatterns,
-                source: userScriptDraft.source,
-                isEnabled: userScriptDraft.isEnabled,
-                injectionTime: userScriptDraft.injectionTime,
-                forMainFrameOnly: userScriptDraft.forMainFrameOnly
-            )
-        }
-
-        cancelUserScriptEditor()
-    }
-
-    private func deleteUserScript(_ script: BrowserUserScript) {
-        withAnimation(.easeInOut(duration: 0.14)) {
-            if editingUserScriptID == script.id {
-                editingUserScriptID = nil
-                userScriptDraft = FullSettingsUserScriptDraft()
-            }
-            isAddingUserScript = false
-            browser.deleteUserScript(id: script.id)
-        }
-    }
 }
 
 // MARK: - Layout primitives
@@ -532,22 +470,6 @@ private struct SettingsActionButton: View {
     }
 }
 
-private struct FullSettingsLabel: View {
-    let title: String
-
-    init(_ title: String) {
-        self.title = title
-    }
-
-    var body: some View {
-        Text(title)
-            .font(.system(size: 11, weight: .semibold))
-            .foregroundStyle(.secondary)
-            .textCase(.uppercase)
-            .kerning(0.4)
-    }
-}
-
 private struct FullSettingsPreferenceRow: View {
     let title: String
     let systemName: String
@@ -629,38 +551,10 @@ private struct FullSettingsCredentialRow: View {
     }
 }
 
-private struct FullSettingsUserScriptDraft: Equatable {
-    var name = "New Script"
-    var matchPatterns = BrowserUserScript.defaultMatchPatterns
-    var source = BrowserUserScript.defaultSource
-    var isEnabled = true
-    var injectionTime: BrowserUserScriptInjectionTime = .documentEnd
-    var forMainFrameOnly = true
-
-    init() {}
-
-    init(script: BrowserUserScript) {
-        name = script.name
-        matchPatterns = script.matchPatterns
-        source = script.source
-        isEnabled = script.isEnabled
-        injectionTime = script.injectionTime
-        forMainFrameOnly = script.forMainFrameOnly
-    }
-
-    var canSave: Bool {
-        !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-        !matchPatterns.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-        !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-}
-
 private struct FullSettingsUserScriptRow: View {
     let script: BrowserUserScript
-    let isEditing: Bool
     let onEnabledChange: (Bool) -> Void
-    let onEdit: () -> Void
-    let onDelete: () -> Void
+    let onReveal: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
@@ -692,44 +586,45 @@ private struct FullSettingsUserScriptRow: View {
                         .fill(Color.primary.opacity(0.07))
                 }
 
-            Button(action: onEdit) {
-                Image(systemName: "pencil")
-                    .font(.system(size: 12, weight: .semibold))
-                    .frame(width: 30, height: 30)
-                    .contentShape(Rectangle())
+            if let sidebarItem = script.sidebarItem {
+                Image(systemName: sidebarItem.systemName)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 22, height: 22)
+                    .background {
+                        Circle()
+                            .fill(Color.primary.opacity(0.07))
+                    }
+                    .help("Sidebar: \(sidebarItem.label)")
             }
-            .buttonStyle(.plain)
-            .cursor(.pointingHand)
-            .accessibilityLabel("Edit \(script.displayName)")
-            .help("Edit")
 
-            Button(action: onDelete) {
-                Image(systemName: "trash")
+            Button(action: onReveal) {
+                Image(systemName: "folder")
                     .font(.system(size: 12, weight: .semibold))
                     .frame(width: 30, height: 30)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .cursor(.pointingHand)
-            .accessibilityLabel("Delete \(script.displayName)")
-            .help("Delete")
+            .accessibilityLabel("Reveal \(script.displayName) in Finder")
+            .help("Reveal in Finder")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(isEditing ? Color.primary.opacity(0.1) : Color.primary.opacity(0.04))
+                .fill(Color.primary.opacity(0.04))
         }
         .overlay {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(Color.primary.opacity(isEditing ? 0.1 : 0.05), lineWidth: 1)
+                .strokeBorder(Color.primary.opacity(0.05), lineWidth: 1)
         }
     }
 
     private var detailText: String {
         let patterns = script.normalizedMatchPatternLines.joined(separator: ", ")
         let frameScope = script.forMainFrameOnly ? "main frame" : "all frames"
-        return "\(patterns) - \(frameScope)"
+        return "\(script.fileURL.lastPathComponent) - \(patterns) - \(frameScope)"
     }
 }
 
@@ -758,132 +653,5 @@ private struct FullSettingsSwitch: View {
         .cursor(.pointingHand)
         .accessibilityLabel(isOn ? "Disable Script" : "Enable Script")
         .help(isOn ? "Disable" : "Enable")
-    }
-}
-
-private struct FullSettingsUserScriptEditor: View {
-    let title: String
-    @Binding var draft: FullSettingsUserScriptDraft
-    let onSave: () -> Void
-    let onCancel: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 10) {
-                Text(title)
-                    .font(.system(size: 13, weight: .semibold))
-
-                Spacer()
-
-                Toggle("Enabled", isOn: $draft.isEnabled)
-                    .font(.system(size: 12, weight: .medium))
-                    .toggleStyle(.switch)
-            }
-
-            VStack(alignment: .leading, spacing: 6) {
-                FullSettingsLabel("Name")
-                FullSettingsTextField(text: $draft.name)
-            }
-
-            VStack(alignment: .leading, spacing: 6) {
-                FullSettingsLabel("Match Patterns")
-                FullSettingsTextEditor(text: $draft.matchPatterns, minHeight: 58, isMonospaced: false)
-            }
-
-            HStack(alignment: .top, spacing: 24) {
-                VStack(alignment: .leading, spacing: 6) {
-                    FullSettingsLabel("Run At")
-                    SettingsSegmentedControl {
-                        ForEach(BrowserUserScriptInjectionTime.allCases, id: \.rawValue) { injectionTime in
-                            SettingsSegmentButton(
-                                title: injectionTime.label,
-                                isSelected: draft.injectionTime == injectionTime
-                            ) {
-                                draft.injectionTime = injectionTime
-                            }
-                        }
-                    }
-                }
-
-                VStack(alignment: .leading, spacing: 6) {
-                    FullSettingsLabel("Scope")
-                    Toggle("Main Frame Only", isOn: $draft.forMainFrameOnly)
-                        .font(.system(size: 12, weight: .medium))
-                        .toggleStyle(.switch)
-                        .frame(height: 34)
-                }
-
-                Spacer(minLength: 0)
-            }
-
-            VStack(alignment: .leading, spacing: 6) {
-                FullSettingsLabel("Source")
-                FullSettingsTextEditor(text: $draft.source, minHeight: 220, isMonospaced: true)
-            }
-
-            HStack(spacing: 8) {
-                SettingsActionButton(title: "Save", systemName: "checkmark") {
-                    onSave()
-                }
-                .disabled(!draft.canSave)
-
-                SettingsActionButton(title: "Cancel", systemName: "xmark") {
-                    onCancel()
-                }
-
-                Spacer(minLength: 0)
-            }
-        }
-        .padding(14)
-        .background {
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .fill(Color.primary.opacity(0.05))
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.09), lineWidth: 1)
-        }
-    }
-}
-
-private struct FullSettingsTextField: View {
-    @Binding var text: String
-
-    var body: some View {
-        TextField("", text: $text)
-            .textFieldStyle(.plain)
-            .font(.system(size: 12))
-            .padding(.horizontal, 9)
-            .frame(height: 32)
-            .background {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Color.primary.opacity(0.06))
-            }
-            .overlay {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(Color.primary.opacity(0.08), lineWidth: 1)
-            }
-    }
-}
-
-private struct FullSettingsTextEditor: View {
-    @Binding var text: String
-    let minHeight: CGFloat
-    let isMonospaced: Bool
-
-    var body: some View {
-        TextEditor(text: $text)
-            .font(isMonospaced ? .system(size: 12, design: .monospaced) : .system(size: 12))
-            .scrollContentBackground(.hidden)
-            .padding(6)
-            .frame(minHeight: minHeight)
-            .background {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Color.primary.opacity(0.06))
-            }
-            .overlay {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(Color.primary.opacity(0.08), lineWidth: 1)
-        }
     }
 }

@@ -16,6 +16,8 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable, WKNavigationDe
     @Published private(set) var favicon: NSImage?
     @Published private(set) var pageFailure: BrowserPageFailure?
     @Published private(set) var pageZoom: CGFloat = 1.0
+    @Published private(set) var isPlayingAudio = false
+    @Published private(set) var isMuted = false
 
     var onStateDidChange: ((BrowserTab) -> Void)?
     var onNavigationDidFinish: ((BrowserTab) -> Void)?
@@ -31,6 +33,11 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable, WKNavigationDe
     private var faviconRequestID: UUID?
     private var lastReportedURLString: String?
     private var pendingNavigationURL: URL?
+    private var audibleMediaFrameIDs: Set<String> = []
+    private var mediaFramesByID: [String: WKFrameInfo] = [:]
+    private var mainMediaFrameID: String?
+    private var mediaPlaybackPollTimer: Timer?
+    private var nativeMediaIsPlaying = false
 
     static let zoomLevels: [CGFloat] = [0.50, 0.67, 0.75, 0.90, 1.0, 1.10, 1.25, 1.50, 1.75, 2.0]
 
@@ -98,8 +105,9 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable, WKNavigationDe
         refreshFromWebView(notify: false)
     }
 
-    deinit {
+    isolated deinit {
         faviconLoadTask?.cancel()
+        mediaPlaybackPollTimer?.invalidate()
     }
 
     func attachUIDelegate(_ delegate: WKUIDelegate) {
@@ -142,7 +150,22 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable, WKNavigationDe
             return
         }
 
-        webView.load(URLRequest(url: url))
+        if let invalidPort = BrowserNavigation.invalidPort(in: url) {
+            pendingNavigationURL = nil
+            isLoading = false
+            pageFailure = .navigationRejected(url: url, detail: "Invalid port \(invalidPort)")
+            onStateDidChange?(self)
+            return
+        }
+
+        guard webView.load(URLRequest(url: url)) != nil else {
+            pendingNavigationURL = nil
+            isLoading = false
+            pageFailure = .navigationRejected(url: url)
+            onStateDidChange?(self)
+            return
+        }
+
         refreshFromWebView()
     }
 
@@ -261,6 +284,52 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable, WKNavigationDe
         webView.evaluateJavaScript("window.getSelection && window.getSelection().removeAllRanges()", completionHandler: nil)
     }
 
+    func toggleMuted() {
+        setMuted(!isMuted)
+    }
+
+    func receiveMediaState(_ body: Any, frameInfo: WKFrameInfo) {
+        guard let payload = body as? [String: Any],
+              payload["type"] as? String == "state",
+              let frameID = payload["frameID"] as? String,
+              !frameID.isEmpty,
+              let frameIsPlayingAudio = payload["isPlayingAudio"] as? Bool else {
+            return
+        }
+
+        if frameInfo.isMainFrame, mainMediaFrameID != frameID {
+            mainMediaFrameID = frameID
+            mediaFramesByID.removeAll()
+            audibleMediaFrameIDs.removeAll()
+        }
+
+        mediaFramesByID[frameID] = frameInfo
+        if isMuted {
+            applyMutedState(to: frameInfo)
+        }
+
+        if frameIsPlayingAudio, !isMuted {
+            audibleMediaFrameIDs.insert(frameID)
+        } else {
+            audibleMediaFrameIDs.remove(frameID)
+        }
+        refreshAudioPlayingState()
+    }
+
+    func prepareForClose() {
+        faviconLoadTask?.cancel()
+        faviconLoadTask = nil
+        faviconRequestID = nil
+        webView.stopLoading()
+        mediaFramesByID.removeAll()
+        mainMediaFrameID = nil
+        audibleMediaFrameIDs.removeAll()
+        nativeMediaIsPlaying = false
+        refreshAudioPlayingState()
+        stopMediaPlaybackMonitoring()
+        webView.setAllMediaPlaybackSuspended(true, completionHandler: nil)
+    }
+
     private func handleObservedURLChange(_ observedURL: URL?) async {
         guard let observedURL,
               BrowserNavigation.isAllowedNavigationURL(observedURL) else {
@@ -279,6 +348,8 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable, WKNavigationDe
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        audibleMediaFrameIDs.removeAll()
+        refreshAudioPlayingState()
         clearFaviconIfNeeded(for: pendingNavigationURL ?? webView.url)
         originSecurityState = BrowserNavigation.originSecurityState(for: pendingNavigationURL ?? webView.url ?? url)
         pageFailure = nil
@@ -325,6 +396,17 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable, WKNavigationDe
         decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void
     ) {
         guard let url = navigationAction.request.url else {
+            decisionHandler(.cancel)
+            return
+        }
+
+        if navigationAction.targetFrame?.isMainFrame == true,
+           let invalidPort = BrowserNavigation.invalidPort(in: url) {
+            pendingNavigationURL = nil
+            self.url = url
+            isLoading = false
+            pageFailure = .navigationRejected(url: url, detail: "Invalid port \(invalidPort)")
+            refreshFromWebView()
             decisionHandler(.cancel)
             return
         }
@@ -387,17 +469,7 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable, WKNavigationDe
         decidePolicyFor navigationResponse: WKNavigationResponse,
         decisionHandler: @escaping @MainActor @Sendable (WKNavigationResponsePolicy) -> Void
     ) {
-        if navigationResponse.isForMainFrame,
-           let httpResponse = navigationResponse.response as? HTTPURLResponse,
-           Self.shouldShowFailure(forHTTPStatusCode: httpResponse.statusCode) {
-            pendingNavigationURL = nil
-            url = httpResponse.url ?? url
-            pageFailure = .httpFailure(url: httpResponse.url ?? url, statusCode: httpResponse.statusCode)
-            refreshFromWebView()
-            decisionHandler(.cancel)
-            return
-        }
-
+        // HTTP error responses can contain the site's own error or verification page.
         if navigationResponse.canShowMIMEType {
             decisionHandler(.allow)
             return
@@ -455,6 +527,65 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable, WKNavigationDe
 
         originSecurityState = BrowserNavigation.originSecurityState(for: webView.url ?? url)
         completionHandler(.useCredential, URLCredential(trust: serverTrust))
+    }
+
+    private func setMuted(_ muted: Bool) {
+        guard isMuted != muted else {
+            return
+        }
+
+        isMuted = muted
+        if muted {
+            audibleMediaFrameIDs.removeAll()
+            refreshAudioPlayingState()
+        }
+
+        for frameInfo in mediaFramesByID.values {
+            applyMutedState(to: frameInfo)
+        }
+    }
+
+    private func applyMutedState(to frameInfo: WKFrameInfo) {
+        webView.callAsyncJavaScript(
+            "window.__browserMediaController?.setMuted(muted);",
+            arguments: ["muted": isMuted],
+            in: frameInfo,
+            in: .page,
+            completionHandler: nil
+        )
+    }
+
+    private func refreshAudioPlayingState() {
+        isPlayingAudio = nativeMediaIsPlaying || !audibleMediaFrameIDs.isEmpty
+    }
+
+    func startMediaPlaybackMonitoring() {
+        guard mediaPlaybackPollTimer == nil else {
+            return
+        }
+
+        pollNativeMediaPlaybackState()
+        mediaPlaybackPollTimer = Timer.scheduledTimer(withTimeInterval: 0.75, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.pollNativeMediaPlaybackState()
+            }
+        }
+    }
+
+    private func stopMediaPlaybackMonitoring() {
+        mediaPlaybackPollTimer?.invalidate()
+        mediaPlaybackPollTimer = nil
+    }
+
+    private func pollNativeMediaPlaybackState() {
+        webView.requestMediaPlaybackState { [weak self] state in
+            guard let self else {
+                return
+            }
+
+            self.nativeMediaIsPlaying = state == .playing
+            self.refreshAudioPlayingState()
+        }
     }
 
     private func refreshFromWebView(notify: Bool = true) {
@@ -639,10 +770,6 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable, WKNavigationDe
         }
 
         return false
-    }
-
-    private static func shouldShowFailure(forHTTPStatusCode statusCode: Int) -> Bool {
-        statusCode == 404 || (500...599).contains(statusCode)
     }
 
     @discardableResult

@@ -533,51 +533,8 @@ final class BrowserDatabase {
         }
     }
 
-    func saveUserScript(_ script: StoredBrowserUserScript) throws {
-        try withStatement(
-            """
-            INSERT INTO user_scripts (
-                id,
-                position,
-                name,
-                match_patterns,
-                source,
-                is_enabled,
-                injection_time,
-                for_main_frame_only,
-                created_at,
-                updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                position = excluded.position,
-                name = excluded.name,
-                match_patterns = excluded.match_patterns,
-                source = excluded.source,
-                is_enabled = excluded.is_enabled,
-                injection_time = excluded.injection_time,
-                for_main_frame_only = excluded.for_main_frame_only,
-                updated_at = excluded.updated_at
-            """
-        ) { statement in
-            let now = Date().timeIntervalSince1970
-            try statement.bind(script.id.uuidString, at: 1)
-            try statement.bind(Int64(script.position), at: 2)
-            try statement.bind(script.name, at: 3)
-            try statement.bind(script.matchPatterns, at: 4)
-            try statement.bind(script.source, at: 5)
-            try statement.bind(script.isEnabled ? Int64(1) : Int64(0), at: 6)
-            try statement.bind(script.injectionTime, at: 7)
-            try statement.bind(script.forMainFrameOnly ? Int64(1) : Int64(0), at: 8)
-            try statement.bind(now, at: 9)
-            try statement.bind(now, at: 10)
-            try statement.stepDone()
-        }
-    }
-
-    func deleteUserScript(id: UUID) throws {
-        try withStatement("DELETE FROM user_scripts WHERE id = ?") { statement in
-            try statement.bind(id.uuidString, at: 1)
+    func clearUserScripts() throws {
+        try withStatement("DELETE FROM user_scripts") { statement in
             try statement.stepDone()
         }
     }
@@ -1039,6 +996,41 @@ final class BrowserDatabase {
                 try execute("CREATE INDEX IF NOT EXISTS login_credentials_origin_idx ON login_credentials(origin)")
                 try execute("CREATE INDEX IF NOT EXISTS login_credentials_updated_idx ON login_credentials(updated_at DESC)")
                 try execute("PRAGMA user_version = 10")
+            }
+        }
+
+        if version < 11 {
+            try transaction {
+                let bookmarkColumns = try columns(in: "bookmarks")
+                if bookmarkColumns.contains("profile_id") {
+                    try execute(
+                        """
+                        CREATE TABLE bookmarks_v11 (
+                            id TEXT PRIMARY KEY,
+                            position INTEGER NOT NULL,
+                            title TEXT NOT NULL,
+                            url TEXT NOT NULL UNIQUE,
+                            created_at REAL NOT NULL,
+                            updated_at REAL NOT NULL
+                        )
+                        """
+                    )
+
+                    try execute(
+                        """
+                        INSERT OR IGNORE INTO bookmarks_v11 (id, position, title, url, created_at, updated_at)
+                        SELECT id, position, title, url, created_at, updated_at
+                        FROM bookmarks
+                        ORDER BY updated_at DESC
+                        """
+                    )
+
+                    try execute("DROP TABLE bookmarks")
+                    try execute("ALTER TABLE bookmarks_v11 RENAME TO bookmarks")
+                }
+
+                try execute("CREATE INDEX IF NOT EXISTS bookmarks_position_idx ON bookmarks(position)")
+                try execute("PRAGMA user_version = 11")
             }
         }
     }

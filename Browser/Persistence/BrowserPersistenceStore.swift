@@ -50,18 +50,10 @@ actor BrowserPersistenceStore {
         }
     }
 
-    func saveUserScript(_ script: StoredBrowserUserScript) {
-        save("Browser user script save failed") {
-            try $0.saveUserScript(script)
-        }
-    }
-
-    func deleteUserScriptAndReindex(id: UUID, remainingScripts: [StoredBrowserUserScript]) {
-        save("Browser user script delete failed") { database in
-            try database.deleteUserScript(id: id)
-            for script in remainingScripts {
-                try database.saveUserScript(script)
-            }
+    func completeUserScriptFileMigration(settingKey: String) {
+        save("Browser user script file migration failed") { database in
+            try database.clearUserScripts()
+            try database.saveSetting(key: settingKey, value: "true")
         }
     }
 

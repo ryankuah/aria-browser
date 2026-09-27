@@ -57,12 +57,13 @@ private struct BrowserContentView: View {
     let onWebViewMounted: () -> Void
     let onRetryFailure: () -> Void
 
+    @ViewBuilder
     var body: some View {
-        ZStack(alignment: .topLeading) {
-            Color.white
-                .allowsHitTesting(false)
+        if let page = BrowserInternalPage.page(for: tab.url) {
+            ZStack(alignment: .topLeading) {
+                Color.white
+                    .allowsHitTesting(false)
 
-            if let page = BrowserInternalPage.page(for: tab.url) {
                 BrowserInternalPageView(
                     page: page,
                     browser: browser,
@@ -70,23 +71,36 @@ private struct BrowserContentView: View {
                         browser.closeTab(id: tab.id)
                     }
                 )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if let failure = tab.pageFailure {
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .clipShape(RoundedRectangle(cornerRadius: webCornerRadius, style: .continuous))
+        } else if let failure = tab.pageFailure {
+            ZStack(alignment: .topLeading) {
+                Color.white
+                    .allowsHitTesting(false)
+
                 BrowserFailureView(
                     failure: failure,
                     onRetry: onRetryFailure
                 )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .transition(.opacity)
-            } else if shouldMountWebView {
-                WebView(
-                    webView: tab.webView,
-                    cornerRadius: webCornerRadius,
-                    occlusionRects: occlusionRects,
-                    onMount: onWebViewMounted
-                )
-                .id(tab.id)
             }
+            // The white error surface needs light-mode foreground colors, independently of the browser chrome.
+            .environment(\.colorScheme, .light)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .clipShape(RoundedRectangle(cornerRadius: webCornerRadius, style: .continuous))
+            .transition(.opacity)
+        } else if shouldMountWebView {
+            WebView(
+                webView: tab.webView,
+                cornerRadius: webCornerRadius,
+                occlusionRects: occlusionRects,
+                onMount: onWebViewMounted
+            )
+            .id(tab.id)
+        } else {
+            Color.white
+                .clipShape(RoundedRectangle(cornerRadius: webCornerRadius, style: .continuous))
+                .allowsHitTesting(false)
         }
     }
 }
@@ -102,20 +116,6 @@ private struct BrowserInternalPageView: View {
             BrowserFullSettingsPage(browser: browser, onClose: onClose)
         case .history:
             BrowserHistoryPage(browser: browser, onClose: onClose)
-        }
-    }
-}
-
-private struct WebContentClipModifier: ViewModifier {
-    let cornerRadius: CGFloat
-    let isEnabled: Bool
-
-    @ViewBuilder
-    func body(content: Content) -> some View {
-        if isEnabled {
-            content.clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-        } else {
-            content
         }
     }
 }
@@ -203,10 +203,6 @@ struct BrowserWindowView: View {
                     }
                 }
                 .frame(width: webSize.width, height: webSize.height, alignment: .topLeading)
-                .modifier(WebContentClipModifier(
-                    cornerRadius: webCornerRadius,
-                    isEnabled: true
-                ))
                 .offset(x: webOrigin.x, y: webOrigin.y)
                 .animation(.easeInOut(duration: 0.16), value: isSidebarVisible)
 
@@ -601,7 +597,7 @@ struct BrowserWindowView: View {
     private func openInternalPage(_ page: BrowserInternalPage) {
         isFindPresented = false
         isSettingsPresented = false
-        _ = browser.navigateAddress(page.url.absoluteString)
+        browser.openInternalPage(page)
     }
 
     private func sidebarOverlay(width: CGFloat, height: CGFloat, leadingCaptureWidth: CGFloat = 0) -> some View {

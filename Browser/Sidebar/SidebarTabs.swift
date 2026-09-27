@@ -24,6 +24,9 @@ struct SidebarTabList: View {
                         onUnpin: {
                             browser.unpinTab(id: tab.id)
                         },
+                        onToggleMute: {
+                            browser.toggleMuteTab(id: tab.id)
+                        },
                         onClose: {
                             browser.closeTab(id: tab.id)
                         }
@@ -130,6 +133,7 @@ private struct BrowserTabRow: View {
     let onSelect: () -> Void
     let onBookmark: () -> Void
     let onUnpin: () -> Void
+    let onToggleMute: () -> Void
     let onClose: () -> Void
 
     @State private var isCloseHovered = false
@@ -152,6 +156,20 @@ private struct BrowserTabRow: View {
                     .lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+
+            if tab.isPlayingAudio || tab.isMuted {
+                Button(action: onToggleMute) {
+                    Image(systemName: tab.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                        .font(.system(size: 10, weight: .semibold))
+                        .frame(width: 20, height: 20)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(tab.isMuted ? Color.secondary : Color.primary)
+                .cursor(.pointingHand)
+                .help(tab.isMuted ? "Unmute Tab" : "Mute Tab")
+                .accessibilityLabel(tab.isMuted ? "Unmute Tab" : "Mute Tab")
+            }
 
             Button(action: onClose) {
                 Image(systemName: "xmark")
@@ -196,6 +214,11 @@ private struct BrowserTabRow: View {
             }
 
             Divider()
+
+            if tab.isPlayingAudio || tab.isMuted {
+                Button(tab.isMuted ? "Unmute Tab" : "Mute Tab", action: onToggleMute)
+                Divider()
+            }
 
             Button("Close Tab", action: onClose)
         }

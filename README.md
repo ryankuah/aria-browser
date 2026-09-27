@@ -1,6 +1,6 @@
-# Browser
+# Aria
 
-A SwiftUI/WebKit browser experiment.
+A SwiftUI/WebKit browser for macOS.
 
 ## App Store Release
 

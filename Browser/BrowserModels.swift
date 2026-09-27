@@ -59,19 +59,24 @@ enum BrowserUserScriptInjectionTime: String, CaseIterable, Equatable, Sendable {
 }
 
 struct BrowserUserScript: Identifiable, Equatable, Sendable {
-    let id: UUID
+    let id: String
+    let fileURL: URL
     var name: String
     var matchPatterns: String
     var source: String
     var isEnabled: Bool
     var injectionTime: BrowserUserScriptInjectionTime
     var forMainFrameOnly: Bool
+    var sidebarIconSystemName: String?
+    var sidebarLabel: String?
     var position: Int
 
     static let defaultMatchPatterns = "<all_urls>"
-    static let defaultSource = """
-    // JavaScript runs on pages matched above.
-    """
+    static let sidebarActionEventName = "browser-userscript-sidebar-action"
+
+    static func sidebarActionEventName(bridgeToken: String) -> String {
+        "\(sidebarActionEventName)-\(bridgeToken)"
+    }
 
     var displayName: String {
         browserDisplayTitle(name, fallback: "User Script")
@@ -89,6 +94,25 @@ struct BrowserUserScript: Identifiable, Equatable, Sendable {
         !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
         !normalizedMatchPatternLines.isEmpty
     }
+
+    var sidebarItem: BrowserUserScriptSidebarItem? {
+        guard isEnabled,
+              let systemName = sidebarIconSystemName?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty else {
+            return nil
+        }
+
+        return BrowserUserScriptSidebarItem(
+            id: id,
+            label: sidebarLabel?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty ?? displayName,
+            systemName: systemName
+        )
+    }
+}
+
+struct BrowserUserScriptSidebarItem: Identifiable, Equatable, Sendable {
+    let id: BrowserUserScript.ID
+    let label: String
+    let systemName: String
 }
 
 enum BrowserDownloadStatus: Equatable, Sendable {
@@ -617,27 +641,15 @@ struct BrowserPageFailure: Equatable {
         )
     }
 
-    static func httpFailure(url: URL?, statusCode: Int) -> BrowserPageFailure {
-        let title: String
-        let message: String
-
-        switch statusCode {
-        case 404:
-            title = "Page Not Found"
-            message = "The server could not find a page at this address."
-        case 500...599:
-            title = "Server Error"
-            message = "The server returned an error instead of the page."
-        default:
-            title = "Page Failed to Load"
-            message = "The server returned an HTTP error for this address."
-        }
-
-        return BrowserPageFailure(
+    static func navigationRejected(
+        url: URL?,
+        detail: String = "The request was rejected before navigation began."
+    ) -> BrowserPageFailure {
+        BrowserPageFailure(
             url: url,
-            title: title,
-            message: message,
-            detail: "HTTP \(statusCode)",
+            title: "This Page Can't Be Reached",
+            message: "Browser could not load the page at this address.",
+            detail: detail,
             isCertificateError: false
         )
     }

@@ -205,12 +205,28 @@ final class BrowserWebContainerView: NSView {
 
 final class BrowserWebView: WKWebView {
     private static let defaultInitialFrame = CGRect(x: 0, y: 0, width: 1280, height: 800)
-    // Safari deliberately freezes the macOS token at 10_15_7 and reports a fixed
-    // WebKit build rather than leaking the host OS version; we mirror that exactly
-    // so sites treat us like Safari. Keep the version tokens in one place so the
-    // full UA and the `applicationNameForUserAgent` suffix can never drift apart.
+    // Safari deliberately freezes the macOS token at 10_15_7. Keep the Safari
+    // version current, though: compatibility-sensitive apps such as Google Docs
+    // select different renderers from this token.
     private static let webKitBuildToken = "AppleWebKit/605.1.15 (KHTML, like Gecko)"
-    static let safariUserAgentSuffix = "Version/18.0 Safari/605.1.15"
+    private static let safariVersion: String = {
+        let applicationURLs = [
+            URL(fileURLWithPath: "/Applications/Safari.app"),
+            URL(fileURLWithPath: "/System/Applications/Safari.app")
+        ]
+
+        for applicationURL in applicationURLs {
+            if let version = Bundle(url: applicationURL)?
+                .object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+               !version.isEmpty {
+                return version
+            }
+        }
+
+        let operatingSystem = ProcessInfo.processInfo.operatingSystemVersion
+        return "\(operatingSystem.majorVersion).\(operatingSystem.minorVersion)"
+    }()
+    static let safariUserAgentSuffix = "Version/\(safariVersion) Safari/605.1.15"
     static let desktopSafariUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \(webKitBuildToken) \(safariUserAgentSuffix)"
     private var isPointerShieldUpdatePending = false
 
@@ -312,6 +328,9 @@ final class BrowserWebView: WKWebView {
         _ configuration: WKWebViewConfiguration,
         consoleMessageHandler: WKScriptMessageHandler? = nil,
         autofillMessageHandler: WKScriptMessageHandler? = nil,
+        mediaMessageHandler: WKScriptMessageHandler? = nil,
+        userScriptMessageHandler: WKScriptMessageHandler? = nil,
+        userScriptBridgeToken: String? = nil,
         userScripts: [BrowserUserScript] = []
     ) {
         configuration.applicationNameForUserAgent = Self.safariUserAgentSuffix
@@ -328,10 +347,18 @@ final class BrowserWebView: WKWebView {
         if let autofillMessageHandler {
             userContentController.add(autofillMessageHandler, contentWorld: .defaultClient, name: "browserAutofill")
         }
+        if let mediaMessageHandler {
+            userContentController.add(mediaMessageHandler, name: "browserMedia")
+        }
+        if let userScriptMessageHandler {
+            userContentController.add(userScriptMessageHandler, contentWorld: .defaultClient, name: "browserUserScript")
+        }
         installConfiguredUserScripts(
             on: userContentController,
             includeConsoleBridge: consoleMessageHandler != nil,
             includeAutofillBridge: autofillMessageHandler != nil,
+            includeMediaBridge: mediaMessageHandler != nil,
+            userScriptBridgeToken: userScriptBridgeToken,
             userScripts: userScripts
         )
     }
@@ -340,6 +367,8 @@ final class BrowserWebView: WKWebView {
         on userContentController: WKUserContentController,
         includeConsoleBridge: Bool,
         includeAutofillBridge: Bool,
+        includeMediaBridge: Bool,
+        userScriptBridgeToken: String? = nil,
         userScripts: [BrowserUserScript]
     ) {
         userContentController.removeAllUserScripts()
@@ -347,6 +376,8 @@ final class BrowserWebView: WKWebView {
             on: userContentController,
             includeConsoleBridge: includeConsoleBridge,
             includeAutofillBridge: includeAutofillBridge,
+            includeMediaBridge: includeMediaBridge,
+            userScriptBridgeToken: userScriptBridgeToken,
             userScripts: userScripts
         )
     }
@@ -506,6 +537,8 @@ final class BrowserWebView: WKWebView {
         on userContentController: WKUserContentController,
         includeConsoleBridge: Bool,
         includeAutofillBridge: Bool,
+        includeMediaBridge: Bool,
+        userScriptBridgeToken: String?,
         userScripts: [BrowserUserScript]
     ) {
         if includeConsoleBridge {
@@ -525,11 +558,23 @@ final class BrowserWebView: WKWebView {
             ))
         }
 
+        if includeMediaBridge {
+            userContentController.addUserScript(WKUserScript(
+                source: mediaStateBridgeScript,
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: false
+            ))
+        }
+
         for userScript in userScripts where userScript.isRunnable {
             userContentController.addUserScript(WKUserScript(
-                source: wrappedUserScriptSource(for: userScript),
+                source: wrappedUserScriptSource(
+                    for: userScript,
+                    bridgeToken: userScriptBridgeToken
+                ),
                 injectionTime: webKitInjectionTime(for: userScript.injectionTime),
-                forMainFrameOnly: userScript.forMainFrameOnly
+                forMainFrameOnly: userScript.forMainFrameOnly,
+                in: .defaultClient
             ))
         }
     }
@@ -543,11 +588,58 @@ final class BrowserWebView: WKWebView {
         }
     }
 
-    private static func wrappedUserScriptSource(for userScript: BrowserUserScript) -> String {
-        #"""
+    private static func wrappedUserScriptSource(
+        for userScript: BrowserUserScript,
+        bridgeToken: String?
+    ) -> String {
+        let resolvedBridgeToken = bridgeToken ?? ""
+        let sidebarActionEventName = resolvedBridgeToken.isEmpty
+            ? BrowserUserScript.sidebarActionEventName
+            : BrowserUserScript.sidebarActionEventName(bridgeToken: resolvedBridgeToken)
+
+        return #"""
         (() => {
+          const scriptID = __BROWSER_USER_SCRIPT_ID__;
           const scriptName = __BROWSER_USER_SCRIPT_NAME__;
           const patterns = __BROWSER_USER_SCRIPT_PATTERNS__;
+          const sidebarActionEventName = __BROWSER_USER_SCRIPT_SIDEBAR_EVENT__;
+          const bridgeToken = __BROWSER_USER_SCRIPT_BRIDGE_TOKEN__;
+          const browserUserScript = Object.freeze({
+            id: scriptID,
+            onSidebarAction(handler) {
+              if (typeof handler !== "function") return () => {};
+              const listener = event => {
+                if (event?.detail?.id === scriptID) handler(event);
+              };
+              window.addEventListener(sidebarActionEventName, listener);
+              return () => window.removeEventListener(sidebarActionEventName, listener);
+            },
+            download(values, options = {}) {
+              if (!bridgeToken) return 0;
+              const urls = (Array.isArray(values) ? values : [values])
+                .map(value => String(value || "").trim())
+                .filter(Boolean)
+                .slice(0, 500);
+              if (urls.length === 0) return 0;
+
+              const folderName = typeof options?.folderName === "string"
+                ? options.folderName.trim().slice(0, 160)
+                : "";
+
+              try {
+                window.webkit.messageHandlers.browserUserScript.postMessage({
+                  action: "download",
+                  token: bridgeToken,
+                  scriptID,
+                  urls,
+                  folderName
+                });
+                return urls.length;
+              } catch (_) {
+                return 0;
+              }
+            }
+          });
           const escapeRegExp = value => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
           const wildcardToRegExp = value => new RegExp(`^${String(value).split("*").map(escapeRegExp).join(".*")}$`);
           const matchesHost = (pattern, host) => {
@@ -593,8 +685,17 @@ final class BrowserWebView: WKWebView {
           }
         })();
         """#
+        .replacingOccurrences(of: "__BROWSER_USER_SCRIPT_ID__", with: javascriptStringLiteral(userScript.id))
         .replacingOccurrences(of: "__BROWSER_USER_SCRIPT_NAME__", with: javascriptStringLiteral(userScript.displayName))
         .replacingOccurrences(of: "__BROWSER_USER_SCRIPT_PATTERNS__", with: javascriptArrayLiteral(userScript.normalizedMatchPatternLines))
+        .replacingOccurrences(
+            of: "__BROWSER_USER_SCRIPT_SIDEBAR_EVENT__",
+            with: javascriptStringLiteral(sidebarActionEventName)
+        )
+        .replacingOccurrences(
+            of: "__BROWSER_USER_SCRIPT_BRIDGE_TOKEN__",
+            with: javascriptStringLiteral(resolvedBridgeToken)
+        )
         .replacingOccurrences(of: "__BROWSER_USER_SCRIPT_SOURCE__", with: indentedUserScriptSource(userScript.source))
     }
 
@@ -622,6 +723,165 @@ final class BrowserWebView: WKWebView {
             .map { "            \($0)" }
             .joined(separator: "\n")
     }
+
+    private static let mediaStateBridgeScript = #"""
+    (() => {
+      if (window.__browserMediaController) return;
+
+      const frameID = (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function")
+        ? globalThis.crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const priorMutedByElement = new WeakMap();
+      const audioContexts = new Set();
+      const suspendedByMute = new Set();
+      const contextMethods = new WeakMap();
+      let isMuted = false;
+      let reportTimer = null;
+
+      const mediaElements = () => Array.from(document.querySelectorAll("audio, video"));
+
+      const postState = override => {
+        const isPlayingAudio = override ?? (!isMuted && (
+          mediaElements().some(element => !element.paused && !element.ended && !element.muted && element.volume > 0) ||
+          Array.from(audioContexts).some(context => context.state === "running")
+        ));
+
+        try {
+          window.webkit.messageHandlers.browserMedia.postMessage({
+            type: "state",
+            frameID,
+            isPlayingAudio
+          });
+        } catch (_) {}
+      };
+
+      const scheduleReport = () => {
+        if (reportTimer !== null) return;
+        reportTimer = setTimeout(() => {
+          reportTimer = null;
+          postState();
+        }, 40);
+      };
+
+      const applyMutedToElement = element => {
+        if (!(element instanceof HTMLMediaElement)) return;
+
+        if (isMuted) {
+          if (!priorMutedByElement.has(element)) priorMutedByElement.set(element, element.muted);
+          if (!element.muted) element.muted = true;
+        } else if (priorMutedByElement.has(element)) {
+          element.muted = priorMutedByElement.get(element);
+          priorMutedByElement.delete(element);
+        }
+      };
+
+      const trackAudioContext = (context, resume, suspend) => {
+        if (!context || audioContexts.has(context)) return context;
+        audioContexts.add(context);
+        contextMethods.set(context, { resume, suspend });
+        context.addEventListener("statechange", () => {
+          if (isMuted && context.state === "running") {
+            suspendedByMute.add(context);
+            suspend.call(context).catch(() => {});
+          }
+          scheduleReport();
+        });
+
+        if (isMuted && context.state === "running") {
+          suspendedByMute.add(context);
+          suspend.call(context).catch(() => {});
+        }
+        scheduleReport();
+        return context;
+      };
+
+      const wrapAudioContext = constructorName => {
+        const Original = window[constructorName];
+        if (typeof Original !== "function" || !Original.prototype) return;
+
+        const originalResume = Original.prototype.resume;
+        const originalSuspend = Original.prototype.suspend;
+        if (typeof originalResume !== "function" || typeof originalSuspend !== "function") return;
+
+        Original.prototype.resume = function(...args) {
+          trackAudioContext(this, originalResume, originalSuspend);
+          if (isMuted) {
+            suspendedByMute.add(this);
+            return Promise.resolve();
+          }
+          return originalResume.apply(this, args);
+        };
+
+        const Wrapped = new Proxy(Original, {
+          construct(target, args, newTarget) {
+            const context = Reflect.construct(target, args, newTarget);
+            return trackAudioContext(context, originalResume, originalSuspend);
+          }
+        });
+
+        try {
+          window[constructorName] = Wrapped;
+        } catch (_) {}
+      };
+
+      const setMuted = muted => {
+        const nextMuted = Boolean(muted);
+        if (isMuted === nextMuted) {
+          mediaElements().forEach(applyMutedToElement);
+          scheduleReport();
+          return;
+        }
+
+        isMuted = nextMuted;
+        mediaElements().forEach(applyMutedToElement);
+
+        if (isMuted) {
+          audioContexts.forEach(context => {
+            if (context.state !== "running") return;
+            const methods = contextMethods.get(context);
+            if (!methods) return;
+            suspendedByMute.add(context);
+            methods.suspend.call(context).catch(() => {});
+          });
+        } else {
+          Array.from(suspendedByMute).forEach(context => {
+            suspendedByMute.delete(context);
+            const methods = contextMethods.get(context);
+            if (methods && context.state === "suspended") {
+              methods.resume.call(context).catch(() => {});
+            }
+          });
+        }
+
+        scheduleReport();
+      };
+
+      Object.defineProperty(window, "__browserMediaController", {
+        value: Object.freeze({ setMuted }),
+        configurable: false,
+        writable: false
+      });
+
+      wrapAudioContext("AudioContext");
+      wrapAudioContext("webkitAudioContext");
+
+      ["play", "playing", "pause", "ended", "volumechange", "emptied"].forEach(eventName => {
+        document.addEventListener(eventName, event => {
+          applyMutedToElement(event.target);
+          scheduleReport();
+        }, true);
+      });
+
+      const observer = new MutationObserver(() => {
+        mediaElements().forEach(applyMutedToElement);
+        scheduleReport();
+      });
+      observer.observe(document, { childList: true, subtree: true });
+
+      window.addEventListener("pagehide", () => postState(false), { once: true });
+      postState();
+    })();
+    """#
 
     private static let consoleBridgeScript = #"""
     (() => {
@@ -693,6 +953,7 @@ final class BrowserWebView: WKWebView {
       const autofillAttribute = "data-browser-autofill-id";
       const reportedForms = new Map();
       let scanTimer = null;
+      let lastSubmission = null;
 
       const post = payload => {
         try {
@@ -754,10 +1015,10 @@ final class BrowserWebView: WKWebView {
         return score;
       };
 
-      const ownerFor = passwordField => {
-        return passwordField.form ||
-          passwordField.closest("form,[role='form'],[data-testid*='login' i],[class*='login' i],[class*='signin' i],[class*='sign-in' i]") ||
-          passwordField.closest("section,main,article,div") ||
+      const ownerFor = field => {
+        return field.form ||
+          field.closest("form,[role='form'],[data-testid*='login' i],[class*='login' i],[class*='signin' i],[class*='sign-in' i]") ||
+          field.closest("section,main,article,div") ||
           document.body;
       };
 
@@ -766,7 +1027,7 @@ final class BrowserWebView: WKWebView {
       };
 
       const fieldName = field => {
-        return field.name || field.id || field.autocomplete || field.getAttribute("aria-label") || "";
+        return field ? (field.name || field.id || field.autocomplete || field.getAttribute("aria-label") || "") : "";
       };
 
       const ensureFormID = owner => {
@@ -789,10 +1050,8 @@ final class BrowserWebView: WKWebView {
           .filter(isUsernameCandidate)
           .filter(field => field.compareDocumentPosition(passwordField) & Node.DOCUMENT_POSITION_FOLLOWING);
 
-        if (usernameCandidates.length === 0) return null;
-
         usernameCandidates.sort((left, right) => usernameScore(right) - usernameScore(left));
-        const usernameField = usernameCandidates[0];
+        const usernameField = usernameCandidates[0] || null;
         return {
           owner,
           formID: ensureFormID(owner),
@@ -805,15 +1064,34 @@ final class BrowserWebView: WKWebView {
 
       const detectFromPasswordField = passwordField => detectOwner(ownerFor(passwordField));
 
+      const detectUsernameOnlyOwner = owner => {
+        if (!(owner instanceof Element)) return null;
+        const controls = controlsIn(owner);
+        if (controls.some(isPasswordField)) return null;
+
+        const usernameCandidates = controls.filter(isUsernameCandidate);
+        usernameCandidates.sort((left, right) => usernameScore(right) - usernameScore(left));
+        const usernameField = usernameCandidates[0] || null;
+        if (!usernameField || usernameScore(usernameField) < 12) return null;
+
+        return {
+          owner,
+          formID: ensureFormID(owner),
+          usernameField,
+          usernameFieldName: fieldName(usernameField)
+        };
+      };
+
       const reportDetected = detected => {
-        const signature = `${detected.usernameFieldName}|${detected.passwordFieldName}`;
+        const signature = `${detected.usernameFieldName}|${detected.passwordFieldName}|${detected.usernameField ? "combined" : "password-only"}`;
         if (reportedForms.get(detected.formID) === signature) return;
         reportedForms.set(detected.formID, signature);
         post({
           type: "formDetected",
           formID: detected.formID,
           usernameFieldName: detected.usernameFieldName,
-          passwordFieldName: detected.passwordFieldName
+          passwordFieldName: detected.passwordFieldName,
+          hasUsernameField: !!detected.usernameField
         });
       };
 
@@ -856,29 +1134,74 @@ final class BrowserWebView: WKWebView {
         const detected = owner ? detectOwner(owner) : null;
         if (!detected) return false;
 
-        setValue(detected.usernameField, String(payload.username || ""));
+        if (detected.usernameField) {
+          setValue(detected.usernameField, String(payload.username || ""));
+        }
         setValue(detected.passwordField, String(payload.password || ""));
         return true;
       };
 
-      document.addEventListener("submit", event => {
-        const form = event.target instanceof HTMLFormElement ? event.target : null;
-        if (!form) return;
-        const detected = detectOwner(form);
-        if (!detected) return;
+      const postOnce = payload => {
+        const signature = JSON.stringify(payload);
+        const now = Date.now();
+        if (lastSubmission && lastSubmission.signature === signature && now - lastSubmission.time < 1000) return;
+        lastSubmission = { signature, time: now };
+        post(payload);
+      };
 
-        const username = String(detected.usernameField.value || "").trim();
-        const password = String(detected.passwordField.value || "");
-        if (!username || !password) return;
+      const captureSubmission = owner => {
+        const detected = detectOwner(owner);
+        if (detected) {
+          const username = detected.usernameField ? String(detected.usernameField.value || "").trim() : "";
+          const password = String(detected.passwordField.value || "");
+          if (!password) return;
 
-        post({
-          type: "credentialsSubmitted",
-          formID: detected.formID,
+          postOnce({
+            type: "credentialsSubmitted",
+            formID: detected.formID,
+            username,
+            password,
+            usernameFieldName: detected.usernameFieldName,
+            passwordFieldName: detected.passwordFieldName
+          });
+          return;
+        }
+
+        const usernameOnly = detectUsernameOnlyOwner(owner);
+        if (!usernameOnly) return;
+        const username = String(usernameOnly.usernameField.value || "").trim();
+        if (!username) return;
+
+        postOnce({
+          type: "usernameSubmitted",
+          formID: usernameOnly.formID,
           username,
-          password,
-          usernameFieldName: detected.usernameFieldName,
-          passwordFieldName: detected.passwordFieldName
+          usernameFieldName: usernameOnly.usernameFieldName
         });
+      };
+
+      const submissionOwner = target => {
+        if (!(target instanceof Element)) return null;
+        if (target instanceof HTMLInputElement && normalized(target.type) === "password") return ownerFor(target);
+        return target.closest("form") || ownerFor(target);
+      };
+
+      document.addEventListener("submit", event => {
+        if (event.target instanceof HTMLFormElement) captureSubmission(event.target);
+      }, true);
+
+      document.addEventListener("click", event => {
+        if (!(event.target instanceof Element)) return;
+        const trigger = event.target.closest("button,input[type='submit'],input[type='image'],[role='button']");
+        if (!trigger) return;
+        const owner = submissionOwner(trigger);
+        if (owner) captureSubmission(owner);
+      }, true);
+
+      document.addEventListener("keydown", event => {
+        if (event.key !== "Enter" || !(event.target instanceof HTMLInputElement)) return;
+        const owner = submissionOwner(event.target);
+        if (owner) captureSubmission(owner);
       }, true);
 
       document.addEventListener("focusin", scheduleScan, true);
@@ -920,6 +1243,42 @@ final class BrowserAutofillScriptMessageHandler: NSObject, WKScriptMessageHandle
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         Task { @MainActor [weak browser] in
             browser?.receiveAutofillMessage(
+                message.body,
+                webView: message.webView as? BrowserWebView,
+                frameInfo: message.frameInfo
+            )
+        }
+    }
+}
+
+final class BrowserMediaScriptMessageHandler: NSObject, WKScriptMessageHandler {
+    weak var browser: BrowserState?
+
+    init(browser: BrowserState) {
+        self.browser = browser
+    }
+
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        Task { @MainActor [weak browser] in
+            browser?.receiveMediaStateMessage(
+                message.body,
+                webView: message.webView as? BrowserWebView,
+                frameInfo: message.frameInfo
+            )
+        }
+    }
+}
+
+final class BrowserUserScriptMessageHandler: NSObject, WKScriptMessageHandler {
+    weak var browser: BrowserState?
+
+    init(browser: BrowserState) {
+        self.browser = browser
+    }
+
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        Task { @MainActor [weak browser] in
+            browser?.receiveUserScriptMessage(
                 message.body,
                 webView: message.webView as? BrowserWebView,
                 frameInfo: message.frameInfo
