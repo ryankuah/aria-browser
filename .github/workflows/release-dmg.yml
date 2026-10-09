@@ -1,0 +1,120 @@
+name: Release DMG
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing version tag to release (vX.Y.Z)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-dmg-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-26
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Validate version tag
+        shell: bash
+        run: |
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Expected vX.Y.Z'; exit 1; }
+
+      - uses: actions/checkout@v6
+        with:
+          ref: refs/tags/${{ inputs.tag || github.ref_name }}
+          persist-credentials: false
+
+      - name: Require a new release
+        shell: bash
+        run: |
+          # Published assets are never silently replaced, including on retries.
+          gh api --paginate "repos/$GH_REPO/releases" --jq '.[].tag_name' > "$RUNNER_TEMP/released-tags.txt"
+          if grep -Fxq "$RELEASE_TAG" "$RUNNER_TEMP/released-tags.txt"; then
+            echo "A release for $RELEASE_TAG already exists. Use a new version tag."
+            exit 1
+          fi
+
+      - name: Install signing and notarization credentials
+        shell: bash
+        env:
+          DEVELOPER_ID_P12_BASE64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
+          DEVELOPER_ID_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for name in DEVELOPER_ID_P12_BASE64 DEVELOPER_ID_P12_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD; do
+            if [[ -z "${!name}" ]]; then echo "Missing GitHub Actions secret: $name"; exit 1; fi
+          done
+          umask 077
+          keychain_path="$RUNNER_TEMP/aria-signing.keychain-db"
+          certificate_path="$RUNNER_TEMP/aria-signing.p12"
+          keychain_password="$(openssl rand -hex 32)"
+          echo "::add-mask::$keychain_password"
+          printf '%s' "$DEVELOPER_ID_P12_BASE64" | base64 --decode > "$certificate_path"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" -P "$DEVELOPER_ID_P12_PASSWORD" -t cert -f pkcs12 -k "$keychain_path" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain_path" > /dev/null
+          security list-keychains -d user -s "$keychain_path" "$HOME/Library/Keychains/login.keychain-db"
+          identity="$(security find-identity -v -p codesigning "$keychain_path" | awk '/Developer ID Application:/ {print $2; exit}')"
+          [[ -n "$identity" ]] || { echo 'No valid Developer ID Application identity in certificate'; exit 1; }
+          xcrun notarytool store-credentials aria-release --keychain "$keychain_path" \
+            --apple-id "$APPLE_ID" --team-id 8H8H5W877U --password "$APPLE_APP_SPECIFIC_PASSWORD"
+          echo "DEVELOPER_ID_APPLICATION=$identity" >> "$GITHUB_ENV"
+          echo 'NOTARY_KEYCHAIN_PROFILE=aria-release' >> "$GITHUB_ENV"
+          echo "NOTARY_KEYCHAIN_PATH=$keychain_path" >> "$GITHUB_ENV"
+          rm -f "$certificate_path"
+
+      - name: Build, sign, notarize, and verify DMG
+        id: package
+        shell: bash
+        env:
+          ARIA_BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          export ARIA_VERSION="${RELEASE_TAG#v}"
+          bash scripts/build-dmg.sh
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          DIST_DIR: ${{ steps.package.outputs.dist }}
+        run: |
+          dmg="$DIST_DIR/Aria-${RELEASE_TAG#v}-universal.dmg"
+          test -f "$dmg"
+          cat > "$RUNNER_TEMP/release-notes.md" <<'NOTES'
+          Download the DMG, open it, and drag Aria into Applications.
+
+          Supports Apple Silicon and Intel Macs running macOS 15 or later. This direct-distribution build is Developer ID signed, notarized by Apple, and runs without App Sandbox.
+
+          When switching from TestFlight, quit the old app before replacing it. The direct build uses a separate data location; existing TestFlight data is not deleted or automatically migrated. Sign in to websites and save passwords again in this build. See the README for migration details.
+
+          Updates are installed from GitHub Releases. TestFlight does not update this build.
+          NOTES
+          gh release create "$RELEASE_TAG" "$dmg" "$DIST_DIR/SHA256SUMS.txt" \
+            --verify-tag --title "Aria ${RELEASE_TAG#v}" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" --generate-notes
+
+      - name: Remove signing credentials
+        if: always()
+        shell: bash
+        run: |
+          if [[ -f "$RUNNER_TEMP/aria-signing.keychain-db" ]]; then
+            security delete-keychain "$RUNNER_TEMP/aria-signing.keychain-db"
+          fi
+          rm -f "$RUNNER_TEMP/aria-signing.p12"

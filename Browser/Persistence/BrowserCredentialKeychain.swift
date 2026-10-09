@@ -80,8 +80,11 @@ enum BrowserCredentialKeychain {
 
     private static func matchQuery(for credential: StoredLoginCredential) -> [String: Any] {
         var query: [String: Any] = [
-            kSecUseDataProtectionKeychain as String: true,
+            // Direct Developer ID builds have no provisioning profile for the
+            // Data Protection Keychain. Use the macOS login keychain instead.
+            kSecUseDataProtectionKeychain as String: false,
             kSecClass as String: kSecClassInternetPassword,
+            kSecAttrSecurityDomain as String: "com.ryankuah.browser",
             kSecAttrServer as String: credential.host,
             kSecAttrAccount as String: credential.username
         ]

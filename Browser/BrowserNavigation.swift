@@ -88,6 +88,37 @@ enum BrowserNavigation {
         return allowedURLSchemes.contains(scheme) || BrowserInternalPage.page(for: url) != nil
     }
 
+    // Pages use these URLs for temporary windows, frames, and generated files.
+    // Keep them separate from URLs accepted by the address bar and bookmarks.
+    static func isAllowedWebContentURL(_ url: URL) -> Bool {
+        if isAllowedNavigationURL(url) {
+            return true
+        }
+
+        switch url.scheme?.lowercased() {
+        case "blob", "data":
+            return true
+        case "about":
+            // WebKit can supply opaque URLs whose Foundation `path` is empty.
+            let page = URLComponents(string: url.absoluteString)?.path
+            return page == "blank" || page == "srcdoc"
+        default:
+            return false
+        }
+    }
+
+    static func isAttachmentResponse(_ response: URLResponse) -> Bool {
+        guard let response = response as? HTTPURLResponse,
+              let disposition = response.value(forHTTPHeaderField: "Content-Disposition") else {
+            return false
+        }
+
+        return disposition.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: false)
+            .first?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() == "attachment"
+    }
+
     static func invalidPort(in url: URL) -> Int? {
         guard let port = url.port,
               !(1...65_535).contains(port) else {

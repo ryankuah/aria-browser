@@ -411,15 +411,15 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable, WKNavigationDe
             return
         }
 
+        if navigationAction.shouldPerformDownload {
+            decisionHandler(BrowserNavigation.isAllowedDownloadURL(url) ? .download : .cancel)
+            return
+        }
+
         if shouldReloadWithDesktopUserAgent(navigationAction) {
             pendingNavigationURL = url
             webView.load(Self.desktopUserAgentRequest(from: navigationAction.request))
             decisionHandler(.cancel)
-            return
-        }
-
-        if navigationAction.shouldPerformDownload {
-            decisionHandler(BrowserNavigation.isAllowedDownloadURL(url) ? .download : .cancel)
             return
         }
 
@@ -430,7 +430,13 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable, WKNavigationDe
             return
         }
 
-        guard BrowserNavigation.isAllowedNavigationURL(url) else {
+        guard BrowserNavigation.isAllowedWebContentURL(url) else {
+            if navigationAction.targetFrame?.isMainFrame == true {
+                pendingNavigationURL = nil
+                isLoading = false
+                pageFailure = .navigationRejected(url: url, detail: "Unsupported URL scheme: \(url.scheme ?? "unknown")")
+                refreshFromWebView()
+            }
             decisionHandler(.cancel)
             return
         }
@@ -445,7 +451,8 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable, WKNavigationDe
     private func shouldReloadWithDesktopUserAgent(_ navigationAction: WKNavigationAction) -> Bool {
         guard navigationAction.targetFrame?.isMainFrame == true,
               let url = navigationAction.request.url,
-              BrowserNavigation.isAllowedNavigationURL(url) else {
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else {
             return false
         }
 
@@ -469,8 +476,10 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable, WKNavigationDe
         decidePolicyFor navigationResponse: WKNavigationResponse,
         decisionHandler: @escaping @MainActor @Sendable (WKNavigationResponsePolicy) -> Void
     ) {
-        // HTTP error responses can contain the site's own error or verification page.
-        if navigationResponse.canShowMIMEType {
+        // A server can request a download even for content WebKit can display.
+        // Otherwise, preserve renderable HTTP error and verification pages.
+        if navigationResponse.canShowMIMEType,
+           !BrowserNavigation.isAttachmentResponse(navigationResponse.response) {
             decisionHandler(.allow)
             return
         }
