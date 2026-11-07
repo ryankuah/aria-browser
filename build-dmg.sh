@@ -161,7 +161,6 @@ build_dmg(str(output), "Aria", settings={
     "filesystem": "HFS+",
     "files": [str(app)],
     "symlinks": {"Applications": "/Applications"},
-    "hide_extensions": ["Aria.app"],
     "background": str(work / "background.tiff"),
     "window_rect": ((200, 200), (600, 400)),
     "default_view": "icon-view",
@@ -177,6 +176,23 @@ build_dmg(str(output), "Aria", settings={
     "text_size": 13,
     "icon_locations": {"Aria.app": (160, 180), "Applications": (440, 180)},
 })
+PY
+
+# Verify the packaged copy too: Finder flags can invalidate an otherwise valid app.
+python3 - "$dmg_path" <<'PY'
+import pathlib, plistlib, subprocess, sys
+
+mounted = plistlib.loads(subprocess.check_output([
+    "hdiutil", "attach", "-readonly", "-nobrowse", "-noautoopen", "-plist", sys.argv[1]
+]))
+volume = next(item for item in mounted["system-entities"] if "mount-point" in item)
+try:
+    app = pathlib.Path(volume["mount-point"]) / "Aria.app"
+    subprocess.run(["codesign", "--verify", "--deep", "--strict", str(app)], check=True)
+    subprocess.run(["xcrun", "stapler", "validate", str(app)], check=True)
+    subprocess.run(["spctl", "--assess", "--type", "execute", "--verbose=2", str(app)], check=True)
+finally:
+    subprocess.run(["hdiutil", "detach", volume["dev-entry"]], check=True)
 PY
 
 codesign --force --sign "$signing_identity" --timestamp "$dmg_path"
