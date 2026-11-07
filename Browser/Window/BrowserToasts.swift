@@ -32,9 +32,6 @@ struct BrowserToastStack: View {
                     onCredentialPrimary: {
                         browser.confirmCredentialToast(id: toast.id)
                     },
-                    onCredentialDismiss: {
-                        browser.dismissToast(id: toast.id)
-                    },
                     onDismiss: {
                         browser.dismissToast(id: toast.id)
                     }
@@ -106,7 +103,6 @@ private struct BrowserToastView: View {
     let onDeny: () -> Void
     let onOpenDownload: () -> Void
     let onCredentialPrimary: () -> Void
-    let onCredentialDismiss: () -> Void
     let onDismiss: () -> Void
 
     @State private var dragOffset: CGFloat = 0
@@ -304,7 +300,7 @@ private struct BrowserToastView: View {
         case .credentialPrompt:
             if toast.status == .pending {
                 HStack(spacing: 8) {
-                    Button("Not Now", action: onCredentialDismiss)
+                    Button("Not Now", action: onDismiss)
                         .buttonStyle(.plain)
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)

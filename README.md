@@ -1,69 +1,96 @@
-# Aria
+<p align="center">
+  <img src="docs/media/aria-icon.png" width="100" alt="Aria app icon">
+</p>
 
-A SwiftUI/WebKit browser for macOS.
+<h1 align="center">Aria</h1>
 
-## Download and install
+<p align="center">A minimal, native browser for macOS.</p>
 
-Download the latest DMG from [GitHub Releases](https://github.com/ryankuah/browser/releases), open it, and drag Aria into Applications. New releases from this pipeline support both Apple Silicon and Intel Macs on macOS 15 or later. Historical releases predate this pipeline; use a release whose notes confirm Developer ID signing and notarization.
+<p align="center">
+  <strong><a href="https://github.com/ryankuah/browser/releases">Download for Mac</a></strong>
+  &nbsp; · &nbsp;
+  <a href="https://github.com/ryankuah/browser/issues">Report an issue</a>
+  &nbsp; · &nbsp;
+  <a href="docs/development.md">Build from source</a>
+</p>
 
-Aria now uses direct distribution with Developer ID signing, hardened runtime, and Apple notarization. App Sandbox is disabled; camera and microphone access still require permission. Download quarantine is separate from App Sandbox: the existing **Remove Download Quarantine** setting still controls Aria's attempt to remove that attribute from completed downloads.
+<p align="center"><sub>macOS 15+ &nbsp; · &nbsp; Apple Silicon & Intel &nbsp; · &nbsp; SwiftUI + WebKit</sub></p>
 
-Updates are installed from GitHub Releases. There is no automatic updater, and TestFlight does not update the direct build.
+> [!WARNING]
+> **Under active development.** Aria is experimental and not yet polished. Features may be incomplete, and bugs may affect browsing, downloads, or saved data. Use it as a secondary browser, keep backups of important data, and avoid relying on it for sensitive or critical tasks.
 
-## Release through GitHub
+![Aria displaying NASA’s Webb website with its sidebar hidden and a thin frame around the page.](docs/media/aria-browser.png)
 
-The `Release DMG` workflow in `.github/workflows/release-dmg.yml` builds a universal app, checks its signature and entitlements, notarizes and staples the app, packages a drag-to-Applications DMG, then signs, notarizes, staples, and verifies the DMG. Only after all checks pass does it publish the DMG and `SHA256SUMS.txt` to a GitHub Release. It does not upload to App Store Connect or TestFlight.
+<p align="center"><sub>Captured in Aria 1.5.4, the current development build. Public releases may differ.</sub></p>
 
-Configure these repository **Actions secrets** once:
+## More room for the web
 
-| Secret | Value |
+Aria gives almost the entire window to the page. A thin bezel frames what you’re reading, watching, or working on.
+
+Move your pointer to the left edge to reveal your tabs, bookmarks, and navigation controls. Move back to the page and the sidebar slips away.
+
+## A new tab, without losing your place
+
+Press **⌘ T** and a floating search field appears over your current page. Type a website or search query, then press **Return** to open it. Your page stays in view until you’re ready to go.
+
+Suggestions help you return to visited pages and switch to tabs you already have open.
+
+![Aria’s floating new-tab prompt with swift.org entered, followed by the Swift website opening.](docs/media/new-tab.gif)
+
+## Familiar controls. A lighter interface.
+
+Swipe with two fingers to move back and forward through your browsing history. Find text with **⌘ F**, step through matches with **⌘ G**, and adjust page zoom from the keyboard.
+
+Built with **SwiftUI and WebKit**, Aria uses the web engine supplied with macOS.
+
+![Aria’s compact find panel searching for Webb and stepping through matches on the page.](docs/media/find-in-page.gif)
+
+## The everyday details
+
+| Feature | What you can do |
 | --- | --- |
-| `DEVELOPER_ID_P12_BASE64` | Base64-encoded Developer ID Application certificate **and private key**, exported as a password-protected `.p12` for team `8H8H5W877U`. An Apple Development or App Store certificate cannot replace this. |
-| `DEVELOPER_ID_P12_PASSWORD` | Password for that `.p12` export. |
-| `APPLE_ID` | Apple developer account email with access to team `8H8H5W877U`. |
-| `APPLE_APP_SPECIFIC_PASSWORD` | App-specific password for Apple's notarization service. |
+| **Tabs & bookmarks** | Drag to reorder tabs, keep favourite sites in the bookmark shelf, and mute tabs playing audio. |
+| **Session restore** | Return to your open tabs after relaunching, or reopen a tab you just closed. |
+| **Downloads** | See progress and transfer speed, open completed files, and reveal them in Finder. |
+| **Your choice of search** | Choose Google, DuckDuckGo, or Brave. |
+| **Userscripts** | Customise websites with JavaScript, URL matching, and optional sidebar buttons. |
+| **Saved passwords** | Save website passwords in the macOS Keychain and autofill returning logins. |
+| **Site permissions** | Control camera and microphone access for the current website. |
+| **Appearance** | Choose a simple bezel, or Liquid Glass on macOS 26 and later. |
 
-For example, upload the certificate without printing it:
+## Get Aria
 
-```sh
-base64 -i /path/to/DeveloperID.p12 | gh secret set DEVELOPER_ID_P12_BASE64
-gh secret set DEVELOPER_ID_P12_PASSWORD
-gh secret set APPLE_ID
-gh secret set APPLE_APP_SPECIFIC_PASSWORD
-```
+1. Download the DMG from [GitHub Releases](https://github.com/ryankuah/browser/releases).
+2. Open it and drag **Aria** into **Applications**.
+3. Launch Aria and press **⌘ T** to start browsing.
 
-Keep credentials out of Git. The workflow imports them into a temporary keychain and deletes it after the job. GitHub's provided token publishes the release; no personal access token is needed.
+Requires **macOS 15 or later**. Install updates from the releases page.
 
-Commit and push the intended release source, then push a new `vX.Y.Z` tag, for example:
+<details>
+<summary><strong>Keyboard shortcuts</strong></summary>
 
-```sh
-git tag v1.5.3
-git push origin v1.5.3
-```
+| Action | Shortcut |
+| --- | --- |
+| Open a new tab | ⌘ T |
+| Close the current tab | ⌘ W |
+| Reopen a closed tab | ⇧ ⌘ T |
+| Find in page | ⌘ F |
+| Next / previous match | ⌘ G / ⇧ ⌘ G |
+| Show history | ⌘ Y |
+| Copy the page link | ⇧ ⌘ C |
+| Zoom in / out / reset | ⌘ + / ⌘ − / ⌘ 0 |
 
-The tag sets the app's marketing version; the workflow run number sets its build number. You can also run `Release DMG` manually with an existing version tag containing this pipeline. Existing GitHub releases are never overwritten; retry a failed job before publication or use a new version tag. Pushing normal commits does not publish a release.
+</details>
 
-## Build a DMG locally
+<details>
+<summary><strong>Build and release</strong></summary>
 
-Use Xcode 26 or newer and a Developer ID Application identity in your keychain. Store notarization credentials interactively, then run:
+Open `Browser.xcodeproj` in **Xcode 26 or newer**, select the `Browser` scheme and your development signing team, then run.
 
-```sh
-xcrun notarytool store-credentials aria-notary
-NOTARY_KEYCHAIN_PROFILE=aria-notary bash scripts/build-dmg.sh
-```
+See the [development guide](docs/development.md) for DMG packaging, signing, and notarisation.
 
-Outputs are saved in a unique `build/dmg/run.*/dist/` directory. Optional environment variables are `ARIA_VERSION`, `ARIA_BUILD_NUMBER`, `DEVELOPER_ID_APPLICATION` (certificate name or hash), and `NOTARY_KEYCHAIN_PATH` (for a nondefault keychain).
+</details>
 
-For local packaging checks without notarization credentials, use `bash scripts/build-dmg.sh --local-only`. This still requires Developer ID signing and produces a clearly labelled `-unnotarized.dmg` for testing, not publication. The GitHub workflow always requires notarization.
+---
 
-## Switching from TestFlight
-
-Quit Aria before replacing the TestFlight copy in Applications. The bundle ID remains `com.ryankuah.browser`, but leaving App Sandbox changes the default data locations. Existing data is preserved in the old container; this change does not automatically migrate it.
-
-To transfer tabs, history, bookmarks, and userscripts manually, with **both copies quit**, back up the old `~/Library/Containers/com.ryankuah.browser/Data/Library/Application Support/com.ryankuah.browser/` folder, then copy it to `~/Library/Application Support/com.ryankuah.browser/` before launching the direct build for the first time. Copy the entire folder, including any SQLite sidecar files. If a destination already exists, back it up and choose which profile to keep instead of merging databases. macOS may request permission to read the old container.
-
-Settings and WebKit website data are separate from that folder and are not migrated by this copy; recheck settings and sign in to websites again as needed. The direct build stores new passwords in the macOS login keychain under Aria's own security domain. Passwords from TestFlight's Data Protection Keychain are left intact but must be entered and saved again in the direct build, including when you copy the old database. TestFlight/App Store builds require a sandboxed configuration and are no longer the release path in this repository.
-
-## Backlog
-
-- Merge pending media permission toasts for the same origin. If a site requests camera and then requests microphone while the first permission toast is still pending, update the existing toast to "Camera and Microphone" instead of showing a second toast. Store both WebKit decision handlers on the same pending request and resolve them together when the user chooses Allow or Deny.
+Made by [Ryan Kuah](https://ryankuah.com). Website content shown in the demos belongs to [NASA](https://science.nasa.gov/mission/webb/) and [Swift.org](https://www.swift.org/).

@@ -248,10 +248,6 @@ private struct DefaultBrowserSettingsSection: View {
             return "Setting Default..."
         }
 
-        if controller.isDefaultBrowser {
-            return "Default Browser"
-        }
-
         if controller.errorMessage != nil {
             return "Try Again"
         }
@@ -260,10 +256,6 @@ private struct DefaultBrowserSettingsSection: View {
     }
 
     private var iconSystemName: String {
-        if controller.isDefaultBrowser {
-            return "checkmark.circle.fill"
-        }
-
         if controller.errorMessage != nil {
             return "exclamationmark.triangle.fill"
         }
@@ -272,10 +264,6 @@ private struct DefaultBrowserSettingsSection: View {
     }
 
     private var foregroundStyle: Color {
-        if controller.isDefaultBrowser {
-            return .green
-        }
-
         if controller.errorMessage != nil {
             return .orange
         }
@@ -284,10 +272,6 @@ private struct DefaultBrowserSettingsSection: View {
     }
 
     private var backgroundColor: Color {
-        if controller.isDefaultBrowser {
-            return Color.green.opacity(0.14)
-        }
-
         if controller.errorMessage != nil {
             return Color.orange.opacity(0.12)
         }
@@ -296,10 +280,6 @@ private struct DefaultBrowserSettingsSection: View {
     }
 
     private var borderColor: Color {
-        if controller.isDefaultBrowser {
-            return Color.green.opacity(0.34)
-        }
-
         if controller.errorMessage != nil {
             return Color.orange.opacity(0.34)
         }
@@ -312,11 +292,7 @@ private struct DefaultBrowserSettingsSection: View {
             return "Default browser change failed: \(errorMessage)"
         }
 
-        if controller.isDefaultBrowser {
-            return "Browser is the default browser"
-        }
-
-        return "Set Browser as the default browser"
+        return "Set Aria as the default browser"
     }
 }
 

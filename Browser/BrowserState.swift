@@ -44,7 +44,8 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
     @Published private var mediaPermissionDecisionsByOrigin: [String: [BrowserMediaDeviceKind: Bool]] = [:]
     @Published private(set) var isElementFullscreenActive = false
 
-    private let persistence = BrowserPersistenceStore()
+    private let persistence: BrowserPersistenceStore
+    private let downloadDirectory: URL
     private let userScriptBridgeToken = UUID().uuidString
     private var startupLoadTask: Task<Void, Never>?
     private var sessionPersistenceTask: Task<Void, Never>?
@@ -58,6 +59,9 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
     private var activeDownloadProgressSnapshots: [BrowserDownload.ID: (receivedBytes: Int64, date: Date)] = [:]
     private var downloadIDsByDownload: [ObjectIdentifier: BrowserDownload.ID] = [:]
     private var destinationDirectoriesByDownload: [ObjectIdentifier: URL] = [:]
+    private var pendingDownloadRequests: [UUID: DownloadRequestLoader] = [:]
+    private var downloadContexts: [BrowserDownload.ID: DownloadContext] = [:]
+    private var reservedDownloadURLs: [ObjectIdentifier: URL] = [:]
     private var toastIDsByDownloadID: [BrowserDownload.ID: BrowserToast.ID] = [:]
     private var mediaPermissionRequests: [BrowserToast.ID: BrowserMediaPermissionRequest] = [:]
     private var externalApplicationPromptURLs: Set<String> = []
@@ -133,7 +137,7 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
     }
 
     var downloadsDirectoryDisplayPath: String {
-        let path = Self.downloadsDirectory.path
+        let path = downloadDirectory.path
         let homePath = FileManager.default.homeDirectoryForCurrentUser.path
 
         if path == homePath {
@@ -163,15 +167,17 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
     }
 
     func openDownloadsFolder() {
-        NSWorkspace.shared.activateFileViewerSelecting([Self.downloadsDirectory])
+        NSWorkspace.shared.activateFileViewerSelecting([downloadDirectory])
     }
 
     func copyDownloadsDirectoryPath() {
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(Self.downloadsDirectory.path, forType: .string)
+        NSPasteboard.general.setString(downloadDirectory.path, forType: .string)
     }
 
     override init() {
+        downloadDirectory = Self.downloadsDirectory
+        persistence = BrowserPersistenceStore()
         super.init()
         loadPersistedState()
     }
@@ -704,51 +710,98 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
     }
 
     func cancelDownload(id: BrowserDownload.ID) {
+        guard let context = downloadContexts[id],
+              downloads.first(where: { $0.id == id })?.status == .inProgress else { return }
+        let attempt = context.attempt
+        // Mark immediately, so repeated clicks or a pending start callback cannot
+        // attach a new transfer after cancellation.
+        markDownloadCanceled(id: id)
+        pendingDownloadRequests.removeValue(forKey: id)?.cancel()
         guard let download = activeDownloads[id] else {
-            markDownloadCanceled(id: id)
+            updateDownload(id: id) { $0.retryAvailable = context.canRetry }
+            persistDownload(id: id)
             return
         }
-
-        download.cancel { [weak self] _ in
-            Task { @MainActor in
-                self?.markDownloadCanceled(id: id)
-                self?.removeActiveDownload(download)
+        download.cancel { [weak self] resumeData in
+            guard let self, self.downloadContexts[id]?.attempt == attempt else { return }
+            if let resumeData { context.resumeData = resumeData }
+            self.updateDownload(id: id) { item in
+                item.retryAvailable = context.canRetry
             }
+            self.persistDownload(id: id)
+            self.removeActiveDownload(download)
         }
     }
 
     func retryDownload(id: BrowserDownload.ID) {
         guard let index = downloads.firstIndex(where: { $0.id == id }),
               downloads[index].canRetry,
-              let sourceURL = downloads[index].sourceURL else {
-            return
-        }
-
-        guard let webView = activeTab?.webView ?? tabs.first?.webView else {
+              let context = downloadContexts[id],
+              activeDownloads[id] == nil else { return }
+        guard context.canRetry else {
             updateDownload(id: id) { item in
-                item.status = .failed
-                item.finishedAt = Date()
-                item.errorMessage = "No active web view"
+                item.retryAvailable = false
+                item.errorMessage = "Start the download again from the website; its original page is no longer available."
             }
             persistDownload(id: id)
             return
         }
 
+        context.attempt = UUID()
+        let resumeData = context.resumeData
+        context.resumeData = nil
         updateDownload(id: id) { item in
-            item.destinationURL = nil
-            item.receivedBytes = 0
-            item.expectedBytes = nil
+            if resumeData == nil {
+                item.destinationURL = nil
+                item.receivedBytes = 0
+                item.expectedBytes = nil
+            }
             item.speedBytesPerSecond = nil
             item.startedAt = Date()
             item.finishedAt = nil
             item.status = .inProgress
+            item.retryAvailable = false
             item.errorMessage = nil
         }
         persistDownload(id: id)
+        startTransfer(id: id, context: context, resumeData: resumeData)
+    }
 
-        webView.startDownload(using: URLRequest(url: sourceURL)) { [weak self] download in
-            Task { @MainActor in
-                self?.attach(download, toExistingID: id)
+    private func startTransfer(id: UUID, context: DownloadContext, resumeData: Data? = nil) {
+        let webView = context.webViewForRetry()
+        let attempt = context.attempt
+        let attach: @MainActor (WKDownload) -> Void = { [weak self, webView] download in
+            guard let self, self.downloadContexts[id]?.attempt == attempt,
+                  self.downloads.first(where: { $0.id == id })?.status == .inProgress else {
+                download.cancel { _ in }
+                return
+            }
+            _ = webView
+            self.pendingDownloadRequests.removeValue(forKey: id)
+            self.attach(download, toExistingID: id, destinationDirectory: context.destinationDirectory)
+        }
+        if let resumeData {
+            webView.resumeDownload(fromResumeData: resumeData, completionHandler: attach)
+        } else if let request = context.request {
+            if request.httpBody != nil || request.httpBodyStream != nil || context.sourceWebView == nil {
+                // WKWebView.startDownload can drop HTTP bodies while crossing
+                // into the network process. A navigation preserves them and
+                // initializes the original cookie session when its tab is gone.
+                let loader = DownloadRequestLoader(request: request, source: webView, didStart: attach) { [weak self] error in
+                    guard let self, self.downloadContexts[id]?.attempt == attempt else { return }
+                    self.pendingDownloadRequests.removeValue(forKey: id)
+                    self.updateDownload(id: id) { item in
+                        item.status = .failed
+                        item.finishedAt = Date()
+                        item.errorMessage = error.localizedDescription
+                        item.retryAvailable = context.canRetry
+                    }
+                    self.persistDownload(id: id)
+                }
+                pendingDownloadRequests[id] = loader
+                loader.start()
+            } else {
+                webView.startDownload(using: request, completionHandler: attach)
             }
         }
     }
@@ -1067,74 +1120,6 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
 
         credentialSaveRequests.removeValue(forKey: id)
         removeToast(id: id)
-    }
-
-    func showDebugDownloadToast() {
-        let id = UUID()
-        let download = BrowserDownload(
-            id: id,
-            sourceURL: URL(string: "https://example.com/debug-download.zip"),
-            destinationURL: nil,
-            suggestedFilename: "debug-download.zip",
-            receivedBytes: 420_000,
-            expectedBytes: 1_000_000,
-            startedAt: Date(),
-            finishedAt: nil,
-            status: .inProgress,
-            errorMessage: nil
-        )
-
-        downloads.insert(download, at: 0)
-        showDownloadToast(for: download)
-    }
-
-    func showDebugMicrophonePermissionToast() {
-        showDebugMediaPermissionToast(
-            title: "example.com Wants to Use Microphone",
-            message: "Allow access to microphone for this request?",
-            iconSystemName: "mic.fill"
-        )
-    }
-
-    func showDebugVideoPermissionToast() {
-        showDebugMediaPermissionToast(
-            title: "example.com Wants to Use Camera",
-            message: "Allow access to camera for this request?",
-            iconSystemName: "video.fill"
-        )
-    }
-
-    func showDebugJavaScriptAlert() {
-        let alert = NSAlert()
-        alert.messageText = "example.com"
-        alert.informativeText = "This is a debug JavaScript alert."
-        alert.addButton(withTitle: "OK")
-
-        runAlert(alert, attachedTo: activeTab?.webView.window) { _ in }
-    }
-
-    func showDebugJavaScriptConfirm() {
-        let alert = NSAlert()
-        alert.messageText = "example.com"
-        alert.informativeText = "This is a debug JavaScript confirm dialog."
-        alert.addButton(withTitle: "OK")
-        alert.addButton(withTitle: "Cancel")
-
-        runAlert(alert, attachedTo: activeTab?.webView.window) { _ in }
-    }
-
-    func showDebugJavaScriptPrompt() {
-        let textField = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
-        textField.stringValue = "Default text"
-
-        let alert = NSAlert()
-        alert.messageText = "example.com"
-        alert.informativeText = "This is a debug JavaScript prompt."
-        alert.accessoryView = textField
-        alert.addButton(withTitle: "OK")
-        alert.addButton(withTitle: "Cancel")
-
-        runAlert(alert, attachedTo: activeTab?.webView.window) { _ in }
     }
 
     func webView(
@@ -1646,8 +1631,8 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         tab.onFullscreenStateDidChange = { [weak self] _ in
             self?.refreshElementFullscreenState()
         }
-        tab.onDownloadDidBegin = { [weak self] tab, download, sourceURL in
-            self?.begin(download, from: sourceURL ?? tab.url)
+        tab.onDownloadDidBegin = { [weak self] tab, download, request in
+            self?.beginDownload(download, request: request, in: tab.webView)
         }
         tab.onExternalApplicationNavigationRequest = { [weak self] tab, url, sourceURL in
             self?.promptToOpenExternalApplication(url, from: tab, sourceURL: sourceURL)
@@ -2103,37 +2088,45 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         NSPasteboard.general.setString(value, forType: .string)
     }
 
-    private func begin(
+    // All entry points (navigation, native context menu and explicit requests)
+    // join the same lifecycle here, before WebKit asks for a destination.
+    func beginDownload(
         _ download: WKDownload,
-        from sourceURL: URL?,
+        request: URLRequest?,
+        in webView: WKWebView,
         destinationDirectory: URL? = nil
     ) {
-        download.delegate = self
+        guard downloadIDsByDownload[ObjectIdentifier(download)] == nil else { return }
+        let request = request ?? download.originalRequest
+        guard let sourceURL = request?.url, BrowserNavigation.isAllowedDownloadURL(sourceURL) else {
+            download.cancel { _ in }
+            return
+        }
+        let id = registerDownload(request: request, in: webView, destinationDirectory: destinationDirectory)
+        attach(download, toExistingID: id, destinationDirectory: destinationDirectory ?? downloadDirectory)
+    }
 
+    private func registerDownload(request: URLRequest?, in webView: WKWebView, destinationDirectory: URL?) -> UUID {
         let id = UUID()
-        let displayName = sourceURL?.lastPathComponent.nonEmpty ?? "Download"
+        downloadContexts[id] = DownloadContext(request: request, webView: webView,
+                                               destinationDirectory: destinationDirectory ?? downloadDirectory)
         downloads.insert(
             BrowserDownload(
-                id: id,
-                sourceURL: sourceURL,
-                destinationURL: nil,
-                suggestedFilename: displayName,
-                receivedBytes: 0,
-                expectedBytes: nil,
-                startedAt: Date(),
-                finishedAt: nil,
-                status: .inProgress,
-                errorMessage: nil
-            ),
-            at: 0
-        )
-        attach(
-            download,
-            toExistingID: id,
-            destinationDirectory: destinationDirectory
+                id: id, sourceURL: request?.url, destinationURL: nil,
+                suggestedFilename: request?.url?.lastPathComponent.nonEmpty ?? "Download",
+                receivedBytes: 0, expectedBytes: nil, startedAt: Date(),
+                finishedAt: nil, status: .inProgress, errorMessage: nil
+            ), at: 0
         )
         showDownloadToast(for: downloads[0])
         persistDownload(id: id)
+        return id
+    }
+
+    func startDownload(_ request: URLRequest, in webView: WKWebView, destinationDirectory: URL? = nil) {
+        guard let url = request.url, BrowserNavigation.isAllowedDownloadURL(url) else { return }
+        let id = registerDownload(request: request, in: webView, destinationDirectory: destinationDirectory)
+        startTransfer(id: id, context: downloadContexts[id]!)
     }
 
     private func startUserScriptDownloads(
@@ -2155,16 +2148,7 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
                     request.setValue(referringURL.absoluteString, forHTTPHeaderField: "Referer")
                 }
 
-                webView.startDownload(using: request) { [weak self] download in
-                    guard let self else {
-                        return
-                    }
-                    self.begin(
-                        download,
-                        from: url,
-                        destinationDirectory: destinationDirectory
-                    )
-                }
+                self.startDownload(request, in: webView, destinationDirectory: destinationDirectory)
 
                 try? await Task.sleep(for: .milliseconds(120))
             }
@@ -2192,33 +2176,58 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         suggestedFilename: String,
         completionHandler: @escaping @MainActor @Sendable (URL?) -> Void
     ) {
-        let downloadObjectID = ObjectIdentifier(download)
-        let destinationURL = uniqueDownloadURL(
-            for: suggestedFilename,
-            in: destinationDirectoriesByDownload[downloadObjectID] ?? Self.downloadsDirectory
-        )
-        update(download) { item in
-            item.suggestedFilename = suggestedFilename
-            item.destinationURL = destinationURL
+        let objectID = ObjectIdentifier(download)
+        guard let id = downloadIDsByDownload[objectID],
+              downloads.first(where: { $0.id == id })?.status == .inProgress else {
+            completionHandler(nil)
+            return
         }
-        refreshDownloadToast(download)
-        persistDownload(download)
-        completionHandler(destinationURL)
+        do {
+            if let response = response as? HTTPURLResponse, response.statusCode >= 400 {
+                throw NSError(domain: "AriaDownload", code: response.statusCode,
+                              userInfo: [NSLocalizedDescriptionKey: "The server refused the download (HTTP \(response.statusCode))."])
+            }
+            let directory = destinationDirectoriesByDownload[objectID] ?? downloadDirectory
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let destinationURL = uniqueDownloadURL(for: suggestedFilename, in: directory)
+            reservedDownloadURLs[objectID] = destinationURL
+            update(download) { item in
+                item.suggestedFilename = suggestedFilename
+                item.destinationURL = destinationURL
+                item.expectedBytes = response.expectedContentLength > 0 ? response.expectedContentLength : nil
+            }
+            refreshDownloadToast(download)
+            persistDownload(download)
+            completionHandler(destinationURL)
+        } catch {
+            failDownload(download, error: error, resumeData: nil)
+            completionHandler(nil)
+        }
     }
 
     func downloadDidFinish(_ download: WKDownload) {
-        let destinationURL = downloadIDsByDownload[ObjectIdentifier(download)].flatMap { id in
-            downloads.first(where: { $0.id == id })?.destinationURL
+        guard let id = downloadIDsByDownload[ObjectIdentifier(download)],
+              let item = downloads.first(where: { $0.id == id }), item.status == .inProgress else { return }
+        guard let destinationURL = item.destinationURL,
+              let attributes = try? FileManager.default.attributesOfItem(atPath: destinationURL.path),
+              let size = attributes[.size] as? NSNumber else {
+            failDownload(download, error: NSError(domain: "AriaDownload", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "The downloaded file could not be found."]), resumeData: nil)
+            return
         }
-
         clearDownloadQuarantineIfNeeded(for: destinationURL)
         update(download) { item in
             item.status = .finished
             item.finishedAt = Date()
+            item.receivedBytes = size.int64Value
+            item.speedBytesPerSecond = nil
+            item.retryAvailable = false
+            item.errorMessage = nil
         }
         refreshDownloadToast(download)
         persistDownload(download)
         removeActiveDownload(download)
+        downloadContexts.removeValue(forKey: id)
     }
 
     func download(
@@ -2230,10 +2239,22 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
     }
 
     func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
+        failDownload(download, error: error, resumeData: resumeData)
+    }
+
+    private func failDownload(_ download: WKDownload, error: Error, resumeData: Data?) {
+        guard let id = downloadIDsByDownload[ObjectIdentifier(download)],
+              let context = downloadContexts[id] else { return }
+        if let resumeData { context.resumeData = resumeData }
         update(download) { item in
             item.status = .failed
             item.finishedAt = Date()
+            item.speedBytesPerSecond = nil
+            item.retryAvailable = context.canRetry
             item.errorMessage = Self.isCancellationError(error) ? "Canceled" : error.localizedDescription
+            if !context.canRetry {
+                item.errorMessage = (item.errorMessage ?? "Download failed") + " Start it again from the website; the original export cannot be replayed safely."
+            }
         }
         refreshDownloadToast(download)
         persistDownload(download)
@@ -2316,6 +2337,7 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
             item.finishedAt = Date()
             item.speedBytesPerSecond = nil
             item.errorMessage = "Canceled"
+            item.retryAvailable = false
         }
         persistDownload(id: id)
     }
@@ -2344,7 +2366,8 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
     }
 
     private func updateDownloadProgress(id: BrowserDownload.ID, progress: Progress) {
-        guard let index = downloads.firstIndex(where: { $0.id == id }),
+        guard activeDownloads[id]?.progress === progress,
+              let index = downloads.firstIndex(where: { $0.id == id }),
               downloads[index].status == .inProgress else {
             return
         }
@@ -2382,25 +2405,13 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         activeDownloadProgressObservations.removeValue(forKey: id)
         activeDownloadProgressSnapshots.removeValue(forKey: id)
         destinationDirectoriesByDownload.removeValue(forKey: downloadObjectID)
+        reservedDownloadURLs.removeValue(forKey: downloadObjectID)
     }
 
     private func showToast(_ toast: BrowserToast) {
         cancelToastDismissal(id: toast.id)
         toasts.removeAll { $0.id == toast.id }
         toasts.insert(toast, at: 0)
-    }
-
-    private func showDebugMediaPermissionToast(title: String, message: String, iconSystemName: String) {
-        showToast(BrowserToast(
-            id: UUID(),
-            kind: .mediaPermission,
-            title: title,
-            message: message,
-            iconSystemName: iconSystemName,
-            status: .pending,
-            progressFraction: nil,
-            downloadID: nil
-        ))
     }
 
     private func showCredentialStatusToast(title: String, message: String, status: BrowserToastStatus) {
@@ -2553,7 +2564,7 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         let sanitizedName = sanitizedFilename(suggestedFilename.nonEmpty ?? "Download")
         let baseURL = downloadsDirectory.appendingPathComponent(sanitizedName, isDirectory: false)
 
-        guard fileManager.fileExists(atPath: baseURL.path) else {
+        guard fileManager.fileExists(atPath: baseURL.path) || reservedDownloadURLs.values.contains(baseURL) else {
             return baseURL
         }
 
@@ -2563,17 +2574,17 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
         for index in 2...999 {
             let candidateName = pathExtension.isEmpty ? "\(name) \(index)" : "\(name) \(index).\(pathExtension)"
             let candidateURL = downloadsDirectory.appendingPathComponent(candidateName, isDirectory: false)
-            if !fileManager.fileExists(atPath: candidateURL.path) {
+            if !fileManager.fileExists(atPath: candidateURL.path), !reservedDownloadURLs.values.contains(candidateURL) {
                 return candidateURL
             }
         }
 
-        return downloadsDirectory.appendingPathComponent("\(UUID().uuidString)-\(sanitizedName)", isDirectory: false)
+        return downloadsDirectory.appendingPathComponent("\(UUID().uuidString)-\(sanitizedName.prefix(50))", isDirectory: false)
     }
 
     private func createUniqueDownloadDirectory(named requestedName: String) -> URL? {
         let fileManager = FileManager.default
-        let downloadsDirectory = Self.downloadsDirectory
+        let downloadsDirectory = downloadDirectory
         let sanitizedName = String(
             sanitizedFilename(requestedName.nonEmpty ?? "Downloaded Images")
                 .prefix(120)
@@ -2625,7 +2636,11 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
             .union(.newlines)
             .union(.controlCharacters)
         let components = filename.components(separatedBy: invalidCharacters)
-        return components.joined(separator: "-").nonEmpty ?? "Download"
+        var name = components.joined(separator: "-").trimmingCharacters(in: .whitespacesAndNewlines)
+        if name.isEmpty || name == "." || name == ".." { name = "Download" }
+        // Leave room for collision suffixes within the filesystem component limit.
+        while name.utf8.count > 230 { name.removeLast() }
+        return name
     }
 
     private func load(_ url: URL, in tab: BrowserTab) {
@@ -3351,4 +3366,101 @@ private struct BrowserCredentialSaveRequest: Sendable {
     let credential: StoredLoginCredential
     let password: String
     let isUpdate: Bool
+}
+
+
+/// Sensitive request headers/bodies and opaque WebKit resume data are deliberately
+/// session-only. Never turn a persisted history URL into a replacement GET request.
+@MainActor
+private final class DownloadContext {
+    let request: URLRequest?
+    weak var sourceWebView: WKWebView?
+    let websiteDataStore: WKWebsiteDataStore
+    let userAgent: String?
+    let destinationDirectory: URL
+    var resumeData: Data?
+    var attempt = UUID()
+
+    init(request: URLRequest?, webView: WKWebView, destinationDirectory: URL) {
+        self.request = request
+        sourceWebView = webView
+        websiteDataStore = webView.configuration.websiteDataStore
+        userAgent = webView.customUserAgent
+        self.destinationDirectory = destinationDirectory
+    }
+
+    var canRetry: Bool {
+        if resumeData != nil { return true }
+        guard let request, let url = request.url,
+              BrowserNavigation.isAllowedDownloadURL(url), request.httpBodyStream == nil else { return false }
+        if url.scheme == "blob" && sourceWebView == nil { return false }
+        let method = request.httpMethod?.uppercased() ?? "GET"
+        // WebKit may omit a streamed POST body in originalRequest. Reopening the
+        // export is safer than silently issuing an empty POST or a different GET.
+        return method == "GET" || method == "HEAD" || request.httpBody != nil
+    }
+
+    func webViewForRetry() -> WKWebView {
+        if let sourceWebView { return sourceWebView }
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = websiteDataStore
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.customUserAgent = userAgent
+        return webView
+    }
+}
+
+
+/// A hidden download-only navigation preserves HTTP bodies and initializes
+/// cookie handling when the originating webview has been released.
+/// No response is rendered or scripted, and the browsing tab is never navigated.
+@MainActor
+private final class DownloadRequestLoader: NSObject, WKNavigationDelegate {
+    private let webView: WKWebView
+    private let request: URLRequest
+    private let didStart: (WKDownload) -> Void
+    private let didFail: (Error) -> Void
+    private var finished = false
+
+    init(request: URLRequest, source: WKWebView, didStart: @escaping (WKDownload) -> Void,
+         didFail: @escaping (Error) -> Void) {
+        self.request = request
+        self.didStart = didStart
+        self.didFail = didFail
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = source.configuration.websiteDataStore
+        webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.customUserAgent = source.customUserAgent
+        super.init()
+        webView.navigationDelegate = self
+    }
+
+    func start() {
+        if webView.load(request) == nil { fail(URLError(.cannotLoadFromNetwork)) }
+    }
+
+    func cancel() {
+        finished = true
+        webView.stopLoading()
+    }
+
+    func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
+                 decisionHandler: @escaping @MainActor @Sendable (WKNavigationResponsePolicy) -> Void) {
+        decisionHandler(.download)
+    }
+
+    func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) {
+        guard !finished else { download.cancel { _ in }; return }
+        finished = true
+        didStart(download)
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { fail(error) }
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { fail(error) }
+
+    private func fail(_ error: Error) {
+        guard !finished else { return }
+        finished = true
+        didFail(error)
+    }
 }

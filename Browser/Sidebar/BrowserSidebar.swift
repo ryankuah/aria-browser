@@ -97,7 +97,6 @@ struct BrowserSidebar: View {
     @ViewBuilder
     private var activePageControls: some View {
         BrowserControls(
-            browser: browser,
             tab: browser.activeTab,
             onOpenAddressPrompt: onOpenAddressPrompt
         )

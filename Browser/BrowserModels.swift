@@ -69,7 +69,6 @@ struct BrowserUserScript: Identifiable, Equatable, Sendable {
     var forMainFrameOnly: Bool
     var sidebarIconSystemName: String?
     var sidebarLabel: String?
-    var position: Int
 
     static let defaultMatchPatterns = "<all_urls>"
     static let sidebarActionEventName = "browser-userscript-sidebar-action"
@@ -167,6 +166,10 @@ struct BrowserDownload: Identifiable, Equatable, Sendable {
     var status: BrowserDownloadStatus
     var errorMessage: String?
 
+    // Request bodies, session context and resume data stay in memory. A history
+    // URL alone is not sufficient to safely retry an export after relaunch.
+    var retryAvailable = false
+
     var displayName: String {
         destinationURL?.lastPathComponent ?? suggestedFilename
     }
@@ -200,11 +203,7 @@ struct BrowserDownload: Identifiable, Equatable, Sendable {
     }
 
     var canRetry: Bool {
-        guard status == .failed, let sourceURL else {
-            return false
-        }
-
-        return BrowserNavigation.isAllowedNavigationURL(sourceURL)
+        status == .failed && retryAvailable
     }
 
     private var inProgressDetailText: String {
@@ -481,14 +480,6 @@ extension NSColor {
         )
     }
 
-    var hexString: String {
-        let color = usingColorSpace(.sRGB) ?? self
-        let red = Int(round(max(0, min(1, color.redComponent)) * 255))
-        let green = Int(round(max(0, min(1, color.greenComponent)) * 255))
-        let blue = Int(round(max(0, min(1, color.blueComponent)) * 255))
-        return String(format: "#%02X%02X%02X", red, green, blue)
-    }
-
     var prefersDarkForeground: Bool {
         let color = usingColorSpace(.sRGB) ?? self
         func linearized(_ component: CGFloat) -> CGFloat {
@@ -556,7 +547,7 @@ struct BrowserPageFailure: Equatable {
 
         if isCertificateError {
             title = "Certificate Error"
-            message = "Browser could not verify this page's identity."
+            message = "Aria could not verify this page's identity."
         } else {
             let copy = navigationFailureCopy(for: nsError, url: url)
             title = copy.title
@@ -599,7 +590,7 @@ struct BrowserPageFailure: Equatable {
         case NSURLErrorCannotFindHost, NSURLErrorDNSLookupFailed:
             return (
                 "Server Not Found",
-                "Browser could not find the server for this address."
+                "Aria could not find the server for this address."
             )
         case NSURLErrorTimedOut:
             return (
@@ -609,7 +600,7 @@ struct BrowserPageFailure: Equatable {
         case NSURLErrorSecureConnectionFailed:
             return (
                 "Secure Connection Failed",
-                "Browser could not establish a secure connection to this page."
+                "Aria could not establish a secure connection to this page."
             )
         case NSURLErrorAppTransportSecurityRequiresSecureConnection:
             return (
@@ -625,7 +616,7 @@ struct BrowserPageFailure: Equatable {
         BrowserPageFailure(
             url: url,
             title: "Certificate Error",
-            message: "Browser could not verify this page's identity.",
+            message: "Aria could not verify this page's identity.",
             detail: "The secure connection was rejected before the page loaded.",
             isCertificateError: true
         )
@@ -648,7 +639,7 @@ struct BrowserPageFailure: Equatable {
         BrowserPageFailure(
             url: url,
             title: "This Page Can't Be Reached",
-            message: "Browser could not load the page at this address.",
+            message: "Aria could not load the page at this address.",
             detail: detail,
             isCertificateError: false
         )

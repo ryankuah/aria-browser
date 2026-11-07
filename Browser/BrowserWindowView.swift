@@ -442,24 +442,6 @@ struct BrowserWindowView: View {
             },
             resetZoom: {
                 browser.resetActiveTabZoom()
-            },
-            showDebugDownloadToast: {
-                browser.showDebugDownloadToast()
-            },
-            showDebugMicrophonePermissionToast: {
-                browser.showDebugMicrophonePermissionToast()
-            },
-            showDebugVideoPermissionToast: {
-                browser.showDebugVideoPermissionToast()
-            },
-            showDebugJavaScriptAlert: {
-                browser.showDebugJavaScriptAlert()
-            },
-            showDebugJavaScriptConfirm: {
-                browser.showDebugJavaScriptConfirm()
-            },
-            showDebugJavaScriptPrompt: {
-                browser.showDebugJavaScriptPrompt()
             }
         ))
         .onAppear {

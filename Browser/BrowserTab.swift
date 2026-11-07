@@ -24,7 +24,7 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable, WKNavigationDe
     var onURLDidChange: ((BrowserTab, URL) -> Void)?
     var onFaviconDidLoad: ((BrowserTab, NSImage) -> Void)?
     var onFullscreenStateDidChange: ((BrowserTab) -> Void)?
-    var onDownloadDidBegin: ((BrowserTab, WKDownload, URL?) -> Void)?
+    var onDownloadDidBegin: ((BrowserTab, WKDownload, URLRequest?) -> Void)?
     var onExternalApplicationNavigationRequest: ((BrowserTab, URL, URL?) -> Void)?
 
     private var fullscreenObservation: NSKeyValueObservation?
@@ -498,7 +498,7 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable, WKNavigationDe
         navigationAction: WKNavigationAction,
         didBecome download: WKDownload
     ) {
-        onDownloadDidBegin?(self, download, navigationAction.request.url)
+        onDownloadDidBegin?(self, download, navigationAction.request)
     }
 
     func webView(
@@ -506,7 +506,17 @@ final class BrowserTab: NSObject, ObservableObject, Identifiable, WKNavigationDe
         navigationResponse: WKNavigationResponse,
         didBecome download: WKDownload
     ) {
-        onDownloadDidBegin?(self, download, navigationResponse.response.url)
+        onDownloadDidBegin?(self, download, download.originalRequest)
+    }
+
+    // macOS WebKit's native Save Image / Download Linked File / media commands
+    // bypass the public navigation-to-download callbacks. Keep this private SPI
+    // bridge isolated: it preserves WebKit's frame, cookies, referrer and blob
+    // context instead of reconstructing a request from a DOM URL. Aria is
+    // distributed directly; verify this callback on every supported macOS release.
+    @objc(_webView:contextMenuDidCreateDownload:)
+    func webView(_ webView: WKWebView, contextMenuDidCreateDownload download: WKDownload) {
+        onDownloadDidBegin?(self, download, download.originalRequest)
     }
 
     func webView(

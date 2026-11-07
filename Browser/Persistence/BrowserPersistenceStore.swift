@@ -206,7 +206,7 @@ actor BrowserPersistenceStore {
             var interruptedDownload = download
             interruptedDownload.status = .failed
             interruptedDownload.finishedAt = Date()
-            interruptedDownload.errorMessage = "Interrupted"
+            interruptedDownload.errorMessage = "Interrupted. Start the download again from the website."
             try database.saveDownload(interruptedDownload)
             return interruptedDownload
         }

@@ -1,7 +1,6 @@
 import SwiftUI
 
 struct BrowserControls: View {
-    @ObservedObject var browser: BrowserState
     var tab: BrowserTab?
     let onOpenAddressPrompt: () -> Void
 

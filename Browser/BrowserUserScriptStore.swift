@@ -220,10 +220,10 @@ enum BrowserUserScriptStore {
             left.lastPathComponent.localizedStandardCompare(right.lastPathComponent) == .orderedAscending
         }
 
-        return fileURLs.enumerated().compactMap { position, fileURL in
+        return fileURLs.compactMap { fileURL in
             do {
                 let source = try String(contentsOf: fileURL, encoding: .utf8)
-                return parseScript(source: source, fileURL: fileURL, position: position)
+                return parseScript(source: source, fileURL: fileURL)
             } catch {
                 NSLog("Browser skipped userscript \(fileURL.lastPathComponent): \(error.localizedDescription)")
                 return nil
@@ -231,7 +231,7 @@ enum BrowserUserScriptStore {
         }
     }
 
-    private static func parseScript(source: String, fileURL: URL, position: Int) -> BrowserUserScript {
+    private static func parseScript(source: String, fileURL: URL) -> BrowserUserScript {
         let metadata = parsedMetadata(from: source)
         let matchPatterns = metadata["match"]?.filter { !$0.isEmpty }
             ?? [BrowserUserScript.defaultMatchPatterns]
@@ -255,8 +255,7 @@ enum BrowserUserScriptStore {
             injectionTime: injectionTime,
             forMainFrameOnly: forMainFrameOnly,
             sidebarIconSystemName: metadata["sidebar-icon"]?.last,
-            sidebarLabel: metadata["sidebar-label"]?.last,
-            position: position
+            sidebarLabel: metadata["sidebar-label"]?.last
         )
     }
 

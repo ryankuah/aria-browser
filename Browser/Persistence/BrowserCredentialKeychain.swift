@@ -73,15 +73,14 @@ enum BrowserCredentialKeychain {
 
     private static func baseQuery(for credential: StoredLoginCredential) -> [String: Any] {
         var query = matchQuery(for: credential)
-        query[kSecAttrLabel as String] = "Browser password for \(credential.displayHost)"
-        query[kSecAttrDescription as String] = "Website password saved by Browser"
+        query[kSecAttrLabel as String] = "Aria password for \(credential.displayHost)"
+        query[kSecAttrDescription as String] = "Website password saved by Aria"
         return query
     }
 
     private static func matchQuery(for credential: StoredLoginCredential) -> [String: Any] {
         var query: [String: Any] = [
-            // Direct Developer ID builds have no provisioning profile for the
-            // Data Protection Keychain. Use the macOS login keychain instead.
+            // Developer ID builds store passwords in the macOS login keychain.
             kSecUseDataProtectionKeychain as String: false,
             kSecClass as String: kSecClassInternetPassword,
             kSecAttrSecurityDomain as String: "com.ryankuah.browser",
