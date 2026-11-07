@@ -7,9 +7,9 @@
 <p align="center">A minimal, native browser for macOS.</p>
 
 <p align="center">
-  <strong><a href="https://github.com/ryankuah/browser/releases">Download for Mac</a></strong>
+  <strong><a href="https://github.com/ryankuah/aria-browser/releases">Download for Mac</a></strong>
   &nbsp; · &nbsp;
-  <a href="https://github.com/ryankuah/browser/issues">Report an issue</a>
+  <a href="https://github.com/ryankuah/aria-browser/issues">Report an issue</a>
   &nbsp; · &nbsp;
   <a href="docs/development.md">Build from source</a>
 </p>
@@ -60,7 +60,7 @@ Built with **SwiftUI and WebKit**, Aria uses the web engine supplied with macOS.
 
 ## Get Aria
 
-1. Download the DMG from [GitHub Releases](https://github.com/ryankuah/browser/releases).
+1. Download the DMG from [GitHub Releases](https://github.com/ryankuah/aria-browser/releases).
 2. Open it and drag **Aria** into **Applications**.
 3. Launch Aria and press **⌘ T** to start browsing.
 
