@@ -1,49 +1,26 @@
 import AppKit
 import SwiftUI
 
-private struct PassthroughHoverRegion: NSViewRepresentable {
-    let onHover: (Bool) -> Void
+private struct PanelPointerRegion: NSViewRepresentable {
+    let moved: (CGPoint?) -> Void
 
-    func makeNSView(context: Context) -> PassthroughHoverView {
-        let view = PassthroughHoverView()
-        view.onHover = onHover
-        return view
-    }
+    func makeNSView(context: Context) -> Tracker { Tracker() }
+    func updateNSView(_ view: Tracker, context: Context) { view.moved = moved }
 
-    func updateNSView(_ nsView: PassthroughHoverView, context: Context) {
-        nsView.onHover = onHover
-    }
-}
-private final class PassthroughHoverView: NSView {
-    var onHover: ((Bool) -> Void)?
-    private var trackingArea: NSTrackingArea?
-
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        nil
-    }
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-
-        if let trackingArea {
-            removeTrackingArea(trackingArea)
+    final class Tracker: NSView {
+        var moved: ((CGPoint?) -> Void)?
+        override var isFlipped: Bool { true }
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            trackingAreas.forEach(removeTrackingArea)
+            addTrackingArea(NSTrackingArea(rect: .zero,
+                options: [.mouseEnteredAndExited, .mouseMoved, .activeInKeyWindow, .inVisibleRect],
+                owner: self, userInfo: nil))
         }
-
-        let trackingArea = NSTrackingArea(
-            rect: .zero,
-            options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
-            owner: self
-        )
-        addTrackingArea(trackingArea)
-        self.trackingArea = trackingArea
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        onHover?(true)
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        onHover?(false)
+        override func mouseEntered(with event: NSEvent) { mouseMoved(with: event) }
+        override func mouseMoved(with event: NSEvent) { moved?(convert(event.locationInWindow, from: nil)) }
+        override func mouseExited(with event: NSEvent) { moved?(nil) }
     }
 }
 
@@ -125,24 +102,19 @@ struct BrowserWindowView: View {
     @StateObject private var windowReference = WindowReference()
     @ObservedObject var externalURLRouter: BrowserExternalURLRouter
 
-    @State private var isLeftZoneHovered = false
-    @State private var isSidebarHovered = false
-    @State private var isNewTabPromptPresented = false
-    @State private var isAddressPromptPresented = false
-    @State private var isConsolePresented = false
-    @State private var isSettingsPresented = false
-    @State private var isFindPresented = false
-    @State private var findNavigationRequest: BrowserFindNavigationRequest?
+    @ObservedObject private var layoutStore = LayoutStore.shared
+    @ObservedObject private var defaultBrowser = DefaultBrowserController.shared
+    @StateObject private var runtime = ComponentRuntime()
+    /// Components open because the pointer is over their hover area or over them,
+    /// including for a moment after it leaves.
+    @State private var hovered: Set<String> = []
+    @State private var pendingHoverClose: [String: DispatchWorkItem] = [:]
+    @State private var isEditingLayout = false
     @State private var commandKeyMonitor: Any?
-    @State private var pendingSidebarClose: DispatchWorkItem?
     @State private var webViewOcclusionRootRects: [CGRect] = []
     @State private var externalURLRegistrationID: UUID?
-
     private let topChromeHeight: CGFloat = 6
-    private let sidebarHoverWidth: CGFloat = 6
     private let contentInset: CGFloat = 6
-    private let sidebarWidth: CGFloat = 236
-    private let sidebarCloseDelay: TimeInterval = 0.1
     private let shellCornerRadius: CGFloat = 20
     private var webCornerRadius: CGFloat {
         max(shellCornerRadius - contentInset, 0)
@@ -152,22 +124,34 @@ struct BrowserWindowView: View {
         browser.accentPrefersDarkForeground ? .light : .dark
     }
 
-    private var isSidebarVisible: Bool {
-        !browser.isElementFullscreenActive && (isLeftZoneHovered || isSidebarHovered)
+    private var runtimeState: RuntimeState {
+        browser.addonState(isDefaultBrowser: defaultBrowser.isDefaultBrowser, uses: Set(layoutStore.userComponents.flatMap(\.uses)))
+    }
+
+    private var componentProps: [String: [String: JSONValue]] {
+        Dictionary(uniqueKeysWithValues: layoutStore.userComponents.map {
+            ($0.type, $0.resolved(layoutStore.document.props(of: $0.type)))
+        })
+    }
+
+    private var renderInput: RenderInput {
+        RenderInput(sources: layoutStore.sources, props: componentProps, state: runtimeState)
     }
 
     var body: some View {
         GeometryReader { proxy in
             let isElementFullscreenActive = browser.isElementFullscreenActive
-            let webOrigin = CGPoint(
-                x: contentInset,
-                y: topChromeHeight
-            )
-            let webSize = CGSize(
-                width: max(proxy.size.width - contentInset - contentInset, 0),
-                height: max(proxy.size.height - webOrigin.y - contentInset, 0)
-            )
-            let sidebarOverlayWidth = min(sidebarWidth, max(webSize.width, 0))
+            let bounds = CGRect(x: contentInset, y: topChromeHeight,
+                                width: max(0, proxy.size.width - 2 * contentInset),
+                                height: max(0, proxy.size.height - topChromeHeight - contentInset))
+            let document = layoutStore.document
+            let hidden = closedViews(in: document)
+            let frames = WindowFrames(document, in: bounds, hidden: hidden) { natural($0) }
+            let webRect = isElementFullscreenActive ? bounds : document.webView.flatMap { frames.frames[$0.id] } ?? .zero
+            let webOrigin = webRect.origin
+            let webSize = webRect.size
+            let webRadius = document.props(of: LayoutDocument.webViewType)["cornerRadius"]?.number.map { CGFloat($0) }
+                ?? webCornerRadius
             ZStack(alignment: .topLeading) {
                 BrowserChromeBackground(
                     bezelStyle: browser.bezelStyle,
@@ -184,7 +168,7 @@ struct BrowserWindowView: View {
                             tab: activeTab,
                             browser: browser,
                             shouldMountWebView: browser.shouldMountWebView(for: activeTab),
-                            webCornerRadius: webCornerRadius,
+                            webCornerRadius: webRadius,
                             occlusionRects: isElementFullscreenActive ? [] : webViewOcclusionRects(
                                 rootRects: webViewOcclusionRootRects,
                                 webOrigin: webOrigin,
@@ -204,29 +188,9 @@ struct BrowserWindowView: View {
                 }
                 .frame(width: webSize.width, height: webSize.height, alignment: .topLeading)
                 .offset(x: webOrigin.x, y: webOrigin.y)
-                .animation(.easeInOut(duration: 0.16), value: isSidebarVisible)
-
-                if isSidebarVisible {
-                    sidebarOverlay(
-                        width: sidebarOverlayWidth,
-                        height: webSize.height,
-                        leadingCaptureWidth: contentInset
-                    )
-                        .offset(x: 0, y: webOrigin.y)
-                        .zIndex(4)
-                }
 
                 if !isElementFullscreenActive {
-                    PassthroughHoverRegion { isHovered in
-                        updateLeftZoneHover(isHovered)
-                    }
-                        .frame(
-                            width: contentInset + sidebarHoverWidth,
-                            height: webSize.height
-                        )
-                        .offset(x: 0, y: webOrigin.y)
-                        .zIndex(3)
-
+                    // The window frame: it moves the window, and shows when the page is loading.
                     WindowDragHandle()
                         .frame(width: proxy.size.width, height: topChromeHeight)
                         .contentShape(Rectangle())
@@ -237,117 +201,43 @@ struct BrowserWindowView: View {
                             .allowsHitTesting(false)
                             .transition(.opacity)
                     }
+
+                    LayoutWindowView(document: document, frames: frames, size: proxy.size,
+                                     environment: layoutEnvironment(isPreview: false), hidden: hidden,
+                                     occludesWebView: true)
+                        .zIndex(1)
+
+                    let overlays = overlayComponents
+                    if !overlays.isEmpty {
+                        overlayLayer(overlays, size: proxy.size)
+                            .zIndex(3)
+                    }
+
+                    PanelPointerRegion { point in
+                        trackPointer(point, frames: frames, bounds: bounds, size: proxy.size)
+                    }
+                    .frame(width: proxy.size.width, height: proxy.size.height)
+                    .zIndex(1)
                 }
 
-                if isNewTabPromptPresented {
-                    NewTabPrompt(
-                        browser: browser,
-                        bezelStyle: browser.bezelStyle,
-                        initialAddressText: "",
-                        selectsInitialText: false,
-                        suggestionMode: .openNewTab,
-                        onSubmit: { address in
-                            guard browser.openNewTab(from: address) else {
-                                return false
-                            }
-
-                            isNewTabPromptPresented = false
-                            return true
-                        },
-                        onSwitchToTab: { tabID in
-                            browser.selectTab(id: tabID)
-                            isNewTabPromptPresented = false
-                        },
-                        onCancel: {
-                            isNewTabPromptPresented = false
-                        }
+                if isEditingLayout {
+                    LayoutEditor(
+                        store: layoutStore, windowSize: proxy.size, contentBounds: bounds,
+                        tab: browser.activeTab, state: runtimeState,
+                        environment: layoutEnvironment(isPreview: true),
+                        windowBackground: AnyView(
+                            BrowserChromeBackground(bezelStyle: browser.bezelStyle, cornerRadius: shellCornerRadius,
+                                                    effect: .material, accentColor: browser.accentNSColor)
+                        ),
+                        onClose: { isEditingLayout = false }
                     )
                     .frame(width: proxy.size.width, height: proxy.size.height)
+                    .clipShape(RoundedRectangle(cornerRadius: shellCornerRadius, style: .continuous))
                     .webViewOcclusionRegion()
-                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
-                    .zIndex(2)
+                    .zIndex(20)
                 }
 
-                if isAddressPromptPresented {
-                    NewTabPrompt(
-                        browser: browser,
-                        bezelStyle: browser.bezelStyle,
-                        initialAddressText: browser.activeTab?.addressText ?? "",
-                        selectsInitialText: true,
-                        suggestionMode: .navigate,
-                        onSubmit: { address in
-                            guard browser.navigateAddress(address) else {
-                                return false
-                            }
-
-                            isAddressPromptPresented = false
-                            return true
-                        },
-                        onSwitchToTab: { tabID in
-                            guard let tab = browser.tabs.first(where: { $0.id == tabID }) else {
-                                return
-                            }
-
-                            guard browser.navigateAddress(tab.addressText) else {
-                                return
-                            }
-
-                            isAddressPromptPresented = false
-                        },
-                        onCancel: {
-                            isAddressPromptPresented = false
-                        }
-                    )
-                    .frame(width: proxy.size.width, height: proxy.size.height)
-                    .webViewOcclusionRegion()
-                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
-                    .zIndex(2)
-                }
-
-                if isConsolePresented {
-                    BrowserConsolePanel(
-                        messages: browser.consoleMessages,
-                        bezelStyle: browser.bezelStyle,
-                        accentColor: browser.accentNSColor,
-                        onCopy: {
-                            copyConsoleMessages(browser.consoleMessages)
-                        },
-                        onClear: {
-                            browser.clearConsoleMessages()
-                        },
-                        onClose: {
-                            withAnimation(.easeInOut(duration: 0.16)) {
-                                isConsolePresented = false
-                            }
-                        }
-                    )
-                    .frame(width: max(proxy.size.width - 24, 0), height: min(max(proxy.size.height * 0.34, 180), 320))
-                    .offset(x: 12, y: max(proxy.size.height - min(max(proxy.size.height * 0.34, 180), 320) - 12, 0))
-                    .webViewOcclusionRegion()
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                    .zIndex(4)
-                }
-
-                if isFindPresented {
-                    BrowserFindPanel(
-                        browser: browser,
-                        navigationRequest: findNavigationRequest,
-                        bezelStyle: browser.bezelStyle,
-                        accentColor: browser.accentNSColor,
-                        onClose: {
-                            closeFindPanel()
-                        }
-                    )
-                    .frame(width: min(max(proxy.size.width - 32, 0), 360))
-                    .offset(
-                        x: webOrigin.x + max(webSize.width - min(max(proxy.size.width - 32, 0), 360) - 12, 0),
-                        y: webOrigin.y + 12
-                    )
-                    .webViewOcclusionRegion()
-                    .transition(.move(edge: .top).combined(with: .opacity))
-                    .zIndex(6)
-                }
-
+                // Camera, microphone and password prompts. Aria keeps these so no component can answer them.
                 BrowserToastStack(browser: browser)
                     .frame(width: min(max(proxy.size.width - 32, 0), 320), alignment: .topTrailing)
                     .offset(
@@ -355,19 +245,6 @@ struct BrowserWindowView: View {
                         y: webOrigin.y + 12
                     )
                     .zIndex(5)
-
-                if let zoomHUD = browser.zoomHUD {
-                    BrowserZoomHUDView(
-                        hud: zoomHUD,
-                        bezelStyle: browser.bezelStyle,
-                        accentColor: browser.accentNSColor
-                    )
-                    .frame(width: max(webSize.width - 24, 0), alignment: .topTrailing)
-                    .offset(x: webOrigin.x + 12, y: webOrigin.y + 12)
-                    .allowsHitTesting(false)
-                    .transition(.move(edge: .top).combined(with: .opacity))
-                    .zIndex(8)
-                }
             }
             .frame(width: proxy.size.width, height: proxy.size.height)
             .coordinateSpace(name: BrowserWindowCoordinateSpace.root)
@@ -375,15 +252,11 @@ struct BrowserWindowView: View {
                 webViewOcclusionRootRects = rects
             }
             .ignoresSafeArea()
-            .animation(.easeOut(duration: 0.12), value: isNewTabPromptPresented)
-            .animation(.easeOut(duration: 0.12), value: isAddressPromptPresented)
-            .animation(.easeInOut(duration: 0.16), value: isSettingsPresented)
-            .animation(.easeInOut(duration: 0.16), value: isFindPresented)
-            .animation(.easeInOut(duration: 0.16), value: isConsolePresented)
+            .animation(.easeInOut(duration: 0.16), value: runtime.toggled)
             .animation(.easeInOut(duration: 0.16), value: browser.bezelStyle)
             .animation(.easeInOut(duration: 0.16), value: browser.accentColorHex)
             .animation(.spring(response: 0.24, dampingFraction: 0.86), value: browser.toasts)
-            .animation(.easeInOut(duration: 0.16), value: browser.zoomHUD)
+            .onChange(of: openComponents) { before, after in componentsChanged(from: before, to: after) }
         }
         .ignoresSafeArea()
         .preferredColorScheme(preferredColorScheme)
@@ -402,49 +275,18 @@ struct BrowserWindowView: View {
                 )
             }
         )
+        // Menu commands go through components first, so one can take them over.
         .focusedSceneValue(\.browserCommandActions, BrowserCommandActions(
-            newTab: {
-                isAddressPromptPresented = false
-                isNewTabPromptPresented = true
-            },
-            reopenClosedTab: {
-                browser.reopenLastClosedTab()
-            },
-            closeTab: {
-                browser.closeActiveTab()
-            },
-            copyPageLink: {
-                browser.copyActivePageLink()
-            },
-            reload: {
-                browser.reloadOrStop()
-            },
-            toggleConsole: {
-                isConsolePresented.toggle()
-            },
-            showFind: {
-                showFindPanel()
-            },
-            findNext: {
-                requestFindNavigation(backwards: false)
-            },
-            findPrevious: {
-                requestFindNavigation(backwards: true)
-            },
-            showHistory: {
-                openInternalPage(.history)
-            },
-            zoomIn: {
-                browser.zoomInActiveTab()
-            },
-            zoomOut: {
-                browser.zoomOutActiveTab()
-            },
-            resetZoom: {
-                browser.resetActiveTabZoom()
-            }
+            customizeLayout: { isEditingLayout = true },
+            run: { runCommand($0) }
         ))
+        .task(id: renderInput) { [input = renderInput] in await runtime.update(input) }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            layoutStore.reloadComponents()
+            defaultBrowser.refresh()
+        }
         .onAppear {
+            defaultBrowser.refresh()
             installCommandKeyMonitorIfNeeded()
         }
         .onChange(of: browser.isElementFullscreenActive) { _, isActive in
@@ -452,9 +294,7 @@ struct BrowserWindowView: View {
                 return
             }
 
-            cancelPendingSidebarClose()
-            isLeftZoneHovered = false
-            isSidebarHovered = false
+            clearHover()
             webViewOcclusionRootRects = []
         }
         .onDisappear {
@@ -464,84 +304,62 @@ struct BrowserWindowView: View {
         }
     }
 
+    /// Open overlay components over the window, behind whatever their files ask for.
+    private func overlayLayer(_ overlays: [ComponentDefinition], size: CGSize) -> some View {
+        let scrim = overlays.last { !$0.clickThrough && $0.scrim != "none" }?.scrim ?? "none"
+        let top = overlays.contains { $0.overlayAlign == "top" }
+        return ZStack(alignment: top ? .top : .center) {
+            if scrim != "none" {
+                (scrim == "accent" ? Color(nsColor: browser.accentNSColor).opacity(0.24) : Color.black.opacity(0.18))
+                    .contentShape(Rectangle())
+                    .webViewOcclusionRegion()
+                    .onTapGesture { overlays.forEach { runtime.close($0.type) } }
+            }
+            VStack(spacing: 12) {
+                ForEach(overlays) { definition in
+                    sizedComponent(definition)
+                        .allowsHitTesting(!definition.clickThrough)
+                        .modifier(OcclusionModifier(enabled: !definition.clickThrough))
+                        .shadow(color: .black.opacity(0.22), radius: 14, y: 7)
+                        .transition(ComponentMotion.transition(definition, edge: definition.slideFrom ?? .top))
+                }
+            }
+            .padding(.top, top ? max(72, size.height * 0.3) : 0)
+        }
+        .frame(width: size.width, height: size.height, alignment: top ? .top : .center)
+        .transition(.opacity)
+    }
+
     private func installCommandKeyMonitorIfNeeded() {
         guard commandKeyMonitor == nil else {
             return
         }
 
+        // Keys come from component files: their `keys`, and their shortcut() activators.
         commandKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            guard windowReference.window?.isKeyWindow ?? false else {
+            guard windowReference.window?.isKeyWindow == true, !isEditingLayout else {
                 return event
             }
 
             let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
-            if modifiers.isEmpty && event.keyCode == 53 {
+            // Esc closes components opened by a button, shortcut or command.
+            if modifiers.isEmpty && event.keyCode == 53 && !runtime.toggled.isEmpty {
+                runtime.closeAll()
+                return nil
             }
 
-            guard let characters = event.charactersIgnoringModifiers?.lowercased() else {
-                return event
-            }
-
-            if modifiers == [.command, .shift] {
-                switch characters {
-                case "t":
-                    browser.reopenLastClosedTab()
+            for definition in layoutStore.userComponents {
+                if let binding = definition.keys.first(where: { $0.shortcut.matches(event) }) {
+                    perform(binding.action, in: definition.type, opener: "keys", event: nil)
                     return nil
-                case "g":
-                    requestFindNavigation(backwards: true)
-                    return nil
-                case "=", "+":
-                    browser.zoomInActiveTab()
-                    return nil
-                default:
-                    break
+                }
+                for activator in definition.activators where activator.kind == .shortcut {
+                    if let shortcut = KeyShortcut(activator.keys ?? ""), shortcut.matches(event) {
+                        runtime.toggle(definition.type)
+                        return nil
+                    }
                 }
             }
-
-            guard modifiers == .command else {
-                return event
-            }
-
-            if characters == "w" {
-                browser.closeActiveTab()
-                return nil
-            }
-
-            if characters == "f" {
-                showFindPanel()
-                return nil
-            }
-
-            if characters == "g" {
-                requestFindNavigation(backwards: false)
-                return nil
-            }
-
-            if characters == "y" {
-                openInternalPage(.history)
-                return nil
-            }
-
-            if characters == "=" || characters == "+" {
-                browser.zoomInActiveTab()
-                return nil
-            }
-
-            if characters == "-" {
-                browser.zoomOutActiveTab()
-                return nil
-            }
-
-            if characters == "0" {
-                browser.resetActiveTabZoom()
-                return nil
-            }
-
-            if let shortcutIndex = Int(characters), (1...9).contains(shortcutIndex) {
-                browser.selectNavigationItem(atShortcutIndex: shortcutIndex)
-                return nil
-            }
-
             return event
         }
     }
@@ -555,112 +373,223 @@ struct BrowserWindowView: View {
         self.commandKeyMonitor = nil
     }
 
-    private func showFindPanel() {
-        withAnimation(.easeInOut(duration: 0.16)) {
-            isFindPresented = true
-        }
-    }
-
-    private func closeFindPanel() {
-        browser.clearActiveFindSelection()
-        withAnimation(.easeInOut(duration: 0.16)) {
-            isFindPresented = false
-        }
-    }
-
-    private func requestFindNavigation(backwards: Bool) {
-        if !isFindPresented {
-            showFindPanel()
-        }
-
-        findNavigationRequest = BrowserFindNavigationRequest(backwards: backwards)
-    }
-
     private func openInternalPage(_ page: BrowserInternalPage) {
-        isFindPresented = false
-        isSettingsPresented = false
+        runtime.closeAll()
         browser.openInternalPage(page)
     }
 
-    private func sidebarOverlay(width: CGFloat, height: CGFloat, leadingCaptureWidth: CGFloat = 0) -> some View {
-        ZStack(alignment: .topLeading) {
-            Color.clear
-                .contentShape(Rectangle())
+    // MARK: Components
 
-            BrowserSidebar(
-                browser: browser,
-                isSettingsPresented: $isSettingsPresented,
-                window: windowReference.window,
-                cornerRadius: webCornerRadius,
-                onOpenFullSettings: {
-                    openInternalPage(.settings)
-                },
-                onOpenAddressPrompt: {
-                    isNewTabPromptPresented = false
-                    isAddressPromptPresented = true
-                },
-                onOpenHistory: {
-                    openInternalPage(.history)
+    private func natural(_ node: LayoutNode) -> CGSize {
+        layoutStore.definition(for: node.type)?.natural(node.role) ?? CGSize(width: 240, height: 200)
+    }
+
+    /// Whether a component is open: always, by its button or shortcut, by a when() rule,
+    /// while the pointer is over its hover area or over it, or while something it opened is.
+    private func isOpen(_ name: String) -> Bool {
+        guard runtime.trees[name] != nil, let definition = layoutStore.definition(for: name), definition.opensAs != .nowhere else { return false }
+        return definition.alwaysOpen || runtime.toggled.contains(name) || runtime.conditions[name] == true
+            || hovered.contains(name) || runtime.parents.values.contains(name)
+            || runtime.holds.values.contains(name)
+    }
+
+    /// Every component that is open right now.
+    private var openComponents: Set<String> {
+        Set(layoutStore.userComponents.map(\.type).filter(isOpen))
+    }
+
+    /// Runs components' onOpen and onClose, and puts closed components back to their starting state.
+    private func componentsChanged(from before: Set<String>, to after: Set<String>) {
+        for name in after.subtracting(before) {
+            if let hook = layoutStore.definition(for: name)?.onOpen { perform(hook, in: name, opener: "onOpen", event: nil) }
+        }
+        for name in before.subtracting(after) {
+            runtime.resetLocal(name)
+            if let hook = layoutStore.definition(for: name)?.onClose { perform(hook, in: name, opener: "onClose", event: nil) }
+            // Panels opened inside a component's slots close with it.
+            for node in layoutStore.document.root where node.type == name {
+                for child in node.flattened.dropFirst() where runtime.toggled.contains(child.type) {
+                    runtime.close(child.type)
                 }
+            }
+        }
+    }
+
+    /// Placed views of components that are closed, or no longer appear where they were placed.
+    private func closedViews(in document: LayoutDocument) -> Set<String> {
+        Set(document.root.filter { node in
+            guard node.role == .view, node.type != LayoutDocument.webViewType else { return false }
+            return layoutStore.definition(for: node.type)?.opensAs != .placed || !isOpen(node.type)
+        }.map(\.id))
+    }
+
+    /// Open overlay components, shown over the middle of the window.
+    private var overlayComponents: [ComponentDefinition] {
+        layoutStore.userComponents.filter { $0.opensAs == .overlay && isOpen($0.type) }
+    }
+
+    private func sizedComponent(_ definition: ComponentDefinition) -> some View {
+        ComponentView(node: LayoutNode(id: "overlay-\(definition.type)", type: definition.type), host: definition.type,
+                      axis: .vertical, fills: definition.height != nil, environment: layoutEnvironment(isPreview: false))
+            .frame(width: definition.width, height: definition.height)
+            .fixedSize(horizontal: definition.width == nil, vertical: definition.height == nil)
+    }
+
+    /// Runs an action from `component`. `event` is what happened, like the text typed.
+    private func perform(_ action: PieceAction, in component: String, opener: String, event: AnyJSON?, handled: Set<String> = []) {
+        let name = action.target.isEmpty ? component : action.target
+        // A component opened from inside another keeps that one open until it closes.
+        let parent = component.isEmpty || name == component ? nil : component
+        switch action.kind {
+        case .open, .toggle:
+            guard layoutStore.definition(for: name) != nil else {
+                runtime.report(component, "There’s no component called \(name).")
+                return
+            }
+            if action.kind == .open { runtime.open(name, in: parent) }
+            else { runtime.toggle(name, in: parent) }
+        case .close:
+            runtime.close(name)
+        case .command:
+            runCommand(action.target, action.arg ?? event, from: component, handled: handled)
+        case .openTab:
+            _ = browser.openNewTab(from: action.target.isEmpty ? event?.string ?? "" : action.target)
+        case .navigate:
+            _ = browser.navigateAddress(action.target.isEmpty ? event?.string ?? "" : action.target)
+        case .set:
+            guard !component.isEmpty else { return }
+            runtime.setLocal(component, action.target, action.arg ?? event)
+        case .fn:
+            Task {
+                for next in await runtime.call(component, action, event: event) where next.kind != .fn {
+                    perform(next, in: component, opener: opener, event: nil, handled: handled)
+                }
+            }
+        }
+    }
+
+    /// Runs a command. A component that `handles` it runs instead, unless that component
+    /// is the one asking: then Aria does it, so a component can take over a command and
+    /// still use it.
+    private func runCommand(_ command: String, _ arg: AnyJSON? = nil, from component: String = "", handled: Set<String> = []) {
+        if !handled.contains(command),
+           layoutStore.definition(for: component)?.handles[command] == nil,
+           let handler = layoutStore.userComponents.first(where: { $0.type != component && $0.handles[command] != nil }),
+           let action = handler.handles[command] {
+            perform(action, in: handler.type, opener: "handles", event: arg, handled: handled.union([command]))
+            return
+        }
+        switch command {
+        case "history": openInternalPage(.history)
+        case "settings": openInternalPage(.settings)
+        case "customize": isEditingLayout = true
+        default:
+            if !browser.runAddonCommand(command, arg, defaultBrowser: defaultBrowser) {
+                runtime.report(component.isEmpty ? "engine" : component, "Unknown command \"\(command)\".")
+            }
+        }
+    }
+
+    private func layoutEnvironment(isPreview: Bool) -> LayoutEnvironment {
+        LayoutEnvironment(
+            definition: { layoutStore.definition(for: $0) },
+            props: componentProps,
+            trees: runtime.trees,
+            errors: runtime.errors,
+            isPreview: isPreview,
+            builtIn: { kind, _ in AnyView(builtInPiece(kind)) },
+            background: { style, radius, corners in
+                AnyView(containerBackground(style, radius: radius, corners: corners, isPreview: isPreview))
+            },
+            perform: { action, component, opener, event in perform(action, in: component, opener: opener, event: event) },
+            isActive: { action in action.kind == .toggle && !action.target.isEmpty && isOpen(action.target) },
+            hold: { button, host in runtime.hold(button, host: host) },
+            isOpen: { isOpen($0) },
+            local: Dictionary(uniqueKeysWithValues: layoutStore.userComponents.map { ($0.type, runtime.localState($0.type)) }),
+            setLocal: { name, key, value in runtime.setLocal(name, key, value) },
+            favicon: { browser.addonFavicon($0) },
+            suggest: { browser.addressSuggestions($0) },
+            accent: Color(nsColor: browser.accentNSColor)
+        )
+    }
+
+    /// The pieces only Aria can draw.
+    @ViewBuilder
+    private func builtInPiece(_ kind: String) -> some View {
+        if kind == "windowControls" {
+            TrafficLightControls(window: windowReference.window)
+        }
+    }
+
+    @ViewBuilder
+    private func containerBackground(_ style: String, radius: CGFloat, corners: String, isPreview: Bool) -> some View {
+        if style == "solid" {
+            ComponentShape(radius: radius, corners: corners).fill(Color(nsColor: browser.accentNSColor))
+        } else {
+            // The editor's scaled preview avoids AppKit-backed glass.
+            BrowserChromeBackground(
+                bezelStyle: browser.bezelStyle,
+                cornerRadius: radius,
+                maskedCorners: Self.cornerMask(corners),
+                effect: isPreview ? .material : .liquidGlass(style: .regular,
+                                                             tintColor: NSColor.black.withAlphaComponent(0.06)),
+                accentColor: browser.accentNSColor
             )
-            .frame(width: width, height: height, alignment: .topLeading)
-            .clipShape(RoundedRectangle(cornerRadius: webCornerRadius, style: .continuous))
-            .offset(x: leadingCaptureWidth)
-        }
-        .frame(width: width + leadingCaptureWidth, height: height, alignment: .topLeading)
-        .webViewOcclusionRegion()
-        .transition(.move(edge: .leading))
-        .onHover { isHovered in
-            updateSidebarHover(isHovered)
         }
     }
 
-    private func updateLeftZoneHover(_ isHovered: Bool) {
-        if isHovered {
-            cancelPendingSidebarClose()
-            withAnimation(.easeInOut(duration: 0.16)) {
-                isLeftZoneHovered = true
+    private static func cornerMask(_ corners: String) -> CACornerMask {
+        switch corners {
+        case "left": [.layerMinXMinYCorner, .layerMinXMaxYCorner]
+        case "right": [.layerMaxXMinYCorner, .layerMaxXMaxYCorner]
+        case "top": [.layerMinXMaxYCorner, .layerMaxXMaxYCorner]
+        case "bottom": [.layerMinXMinYCorner, .layerMaxXMinYCorner]
+        default: [.layerMinXMinYCorner, .layerMaxXMinYCorner, .layerMinXMaxYCorner, .layerMaxXMaxYCorner]
+        }
+    }
+
+    /// Opens components whose hover area or open view the pointer is over. They close a
+    /// moment after it leaves, so crossing a gap doesn't close them. Hover areas on the edge
+    /// of the content reach the window's edge, so flinging the pointer there opens them.
+    private func trackPointer(_ point: CGPoint?, frames: WindowFrames, bounds: CGRect, size: CGSize) {
+        var inside = Set<String>()
+        if let point {
+            for node in layoutStore.document.root {
+                guard var rect = frames.frames[node.id] else { continue }
+                switch node.role {
+                case .hover:
+                    if rect.minX <= bounds.minX + 0.5 { rect = CGRect(x: 0, y: rect.minY, width: rect.maxX, height: rect.height) }
+                    if rect.maxX >= bounds.maxX - 0.5 { rect.size.width = size.width - rect.minX }
+                    if rect.minY <= bounds.minY + 0.5 { rect = CGRect(x: rect.minX, y: 0, width: rect.width, height: rect.maxY) }
+                    if rect.maxY >= bounds.maxY - 0.5 { rect.size.height = size.height - rect.minY }
+                    if rect.contains(point) { inside.insert(node.type) }
+                // A closed component still has a frame, but the pointer can't be inside it.
+                case .view where layoutStore.definition(for: node.type)?.activator(.hover) != nil && isOpen(node.type):
+                    if rect.contains(point) { inside.insert(node.type) }
+                default:
+                    break
+                }
             }
-            return
         }
-
-        scheduleSidebarClose {
-            isLeftZoneHovered = false
+        for name in inside {
+            pendingHoverClose.removeValue(forKey: name)?.cancel()
+            if !hovered.contains(name) { hovered.insert(name) }
         }
-    }
-
-    private func updateSidebarHover(_ isHovered: Bool) {
-        if isHovered {
-            cancelPendingSidebarClose()
-            withAnimation(.easeInOut(duration: 0.16)) {
-                isLeftZoneHovered = false
-                isSidebarHovered = true
+        for name in hovered.subtracting(inside) where pendingHoverClose[name] == nil {
+            let delay = layoutStore.definition(for: name)?.activator(.hover)?.closeDelay ?? 0.1
+            let work = DispatchWorkItem {
+                pendingHoverClose[name] = nil
+                hovered.remove(name)
             }
-            return
-        }
-
-        scheduleSidebarClose {
-            isSidebarHovered = false
+            pendingHoverClose[name] = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + min(3600, max(0, delay)), execute: work)
         }
     }
 
-    private func scheduleSidebarClose(_ update: @escaping () -> Void) {
-        pendingSidebarClose?.cancel()
-
-        let workItem = DispatchWorkItem {
-            withAnimation(.easeInOut(duration: 0.16)) {
-                update()
-            }
-            pendingSidebarClose = nil
-        }
-
-        pendingSidebarClose = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + sidebarCloseDelay, execute: workItem)
-    }
-
-    private func cancelPendingSidebarClose() {
-        pendingSidebarClose?.cancel()
-        pendingSidebarClose = nil
+    private func clearHover() {
+        pendingHoverClose.values.forEach { $0.cancel() }
+        pendingHoverClose = [:]
+        hovered = []
     }
 
     private func webViewOcclusionRects(rootRects: [CGRect], webOrigin: CGPoint, webSize: CGSize) -> [CGRect] {
@@ -681,23 +610,5 @@ struct BrowserWindowView: View {
                 height: intersection.height
             )
         }
-    }
-
-    private func copyConsoleMessages(_ messages: [BrowserConsoleMessage]) {
-        let text = messages.map { message in
-            [
-                BrowserConsoleRow.timeString(for: message.date),
-                message.level.uppercased(),
-                message.source,
-                message.message,
-                message.url ?? ""
-            ]
-                .filter { !$0.isEmpty }
-                .joined(separator: " ")
-        }
-            .joined(separator: "\n")
-
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
     }
 }

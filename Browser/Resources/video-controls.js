@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Video Controls
-// @enabled      true
+// @enabled      false
 // @match        <all_urls>
 // @run-at       document-end
 // @frames       all

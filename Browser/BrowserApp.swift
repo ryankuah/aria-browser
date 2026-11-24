@@ -57,109 +57,68 @@ struct BrowserApp: App {
 private struct BrowserCommands: Commands {
     @FocusedValue(\.browserCommandActions) private var browserCommandActions
 
+    @ObservedObject private var store = LayoutStore.shared
+
+    private func command(_ label: String, _ name: String, requiresPanel: Bool = false) -> some View {
+        let shortcut = store.userComponents.lazy.flatMap(\.keys).first {
+            $0.action.kind == .command && $0.action.target == name && $0.action.arg == nil
+        }?.shortcut.menuShortcut
+        let available = !requiresPanel || store.userComponents.contains {
+            $0.handles[name] != nil && ($0.opensAs != .placed || store.document.nodes(of: $0.type).contains { $0.role == .view })
+        }
+        return Button(label) { browserCommandActions?.run(name) }
+            .keyboardShortcut(shortcut)
+            .disabled(browserCommandActions == nil || !available)
+    }
+
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
-            Button("New Tab") {
-                browserCommandActions?.newTab()
-            }
-            .keyboardShortcut("t", modifiers: [.command])
-            .disabled(browserCommandActions == nil)
-
-            Button("Reopen Closed Tab") {
-                browserCommandActions?.reopenClosedTab()
-            }
-            .keyboardShortcut("t", modifiers: [.command, .shift])
-            .disabled(browserCommandActions == nil)
-
-            Button("Close Tab") {
-                browserCommandActions?.closeTab()
-            }
-            .keyboardShortcut("w", modifiers: [.command])
-            .disabled(browserCommandActions == nil)
-
-            Button("Copy Page Link") {
-                browserCommandActions?.copyPageLink()
-            }
-            .keyboardShortcut("c", modifiers: [.command, .shift])
-            .disabled(browserCommandActions == nil)
-
-            Button("Reload Page") {
-                browserCommandActions?.reload()
-            }
-            .keyboardShortcut("r", modifiers: [.command])
-            .disabled(browserCommandActions == nil)
-
-            Button("Show History") {
-                browserCommandActions?.showHistory()
-            }
-            .keyboardShortcut("y", modifiers: [.command])
-            .disabled(browserCommandActions == nil)
+            command("New Tab", "newTab")
+            command("Open Location…", "editAddress", requiresPanel: true)
+            command("Reopen Closed Tab", "reopenTab")
+            command("Close Tab", "closeTab")
+            command("Copy Page Link", "copyLink")
+            command("Reload Page", "reload")
+            command("Show History", "history")
         }
-
+        CommandGroup(replacing: .appSettings) {
+            command("Settings…", "settings")
+        }
         CommandGroup(after: .appInfo) {
-            Button("Show Console") {
-                browserCommandActions?.toggleConsole()
-            }
-            .keyboardShortcut("j", modifiers: [.command, .option])
-            .disabled(browserCommandActions == nil)
+            command("Show Console", "console", requiresPanel: true)
         }
-
+        CommandGroup(after: .toolbar) {
+            Button("Customize Layout…") { browserCommandActions?.customizeLayout() }
+                .keyboardShortcut("l", modifiers: [.command, .option])
+                .disabled(browserCommandActions == nil)
+        }
         CommandMenu("Page") {
-            Button("Find in Page") {
-                browserCommandActions?.showFind()
-            }
-            .keyboardShortcut("f", modifiers: [.command])
-            .disabled(browserCommandActions == nil)
-
-            Button("Find Next") {
-                browserCommandActions?.findNext()
-            }
-            .keyboardShortcut("g", modifiers: [.command])
-            .disabled(browserCommandActions == nil)
-
-            Button("Find Previous") {
-                browserCommandActions?.findPrevious()
-            }
-            .keyboardShortcut("g", modifiers: [.command, .shift])
-            .disabled(browserCommandActions == nil)
-
+            command("Find in Page", "find", requiresPanel: true)
+            command("Find Next", "findNext", requiresPanel: true)
+            command("Find Previous", "findPrevious", requiresPanel: true)
             Divider()
-
-            Button("Zoom In") {
-                browserCommandActions?.zoomIn()
-            }
-            .keyboardShortcut("+", modifiers: [.command])
-            .disabled(browserCommandActions == nil)
-
-            Button("Zoom Out") {
-                browserCommandActions?.zoomOut()
-            }
-            .keyboardShortcut("-", modifiers: [.command])
-            .disabled(browserCommandActions == nil)
-
-            Button("Actual Size") {
-                browserCommandActions?.resetZoom()
-            }
-            .keyboardShortcut("0", modifiers: [.command])
-            .disabled(browserCommandActions == nil)
+            command("Zoom In", "zoomIn")
+            command("Zoom Out", "zoomOut")
+            command("Actual Size", "resetZoom")
         }
     }
 }
 
+private extension KeyShortcut {
+    var menuShortcut: KeyboardShortcut? {
+        guard let character = key.first else { return nil }
+        var modifiers: SwiftUI.EventModifiers = []
+        if command { modifiers.insert(.command) }
+        if shift { modifiers.insert(.shift) }
+        if option { modifiers.insert(.option) }
+        if control { modifiers.insert(.control) }
+        return KeyboardShortcut(KeyEquivalent(character), modifiers: modifiers)
+    }
+}
+
 struct BrowserCommandActions {
-    var newTab: () -> Void
-    var reopenClosedTab: () -> Void
-    var closeTab: () -> Void
-    var copyPageLink: () -> Void
-    var reload: () -> Void
-    var toggleConsole: () -> Void
-    var showFind: () -> Void
-    var findNext: () -> Void
-    var findPrevious: () -> Void
-    var showHistory: () -> Void
-    var zoomIn: () -> Void
-    var zoomOut: () -> Void
-    var resetZoom: () -> Void
+    var customizeLayout: () -> Void
+    var run: (String) -> Void
 }
 
 private struct BrowserCommandActionsKey: FocusedValueKey {

@@ -1,0 +1,52 @@
+{
+  "version": 8,
+  "root": [
+    {
+      "id": "web",
+      "type": "WebView",
+      "layout": { "left": 0, "top": 0, "right": 0, "bottom": 0 }
+    },
+    {
+      "id": "sidebar",
+      "type": "Sidebar",
+      "layout": { "left": 0, "top": 0, "bottom": 0, "width": 236 },
+      "slots": {
+        "panels": [
+          { "id": "downloads-panel", "type": "DownloadsPanel" },
+          { "id": "quick-settings", "type": "QuickSettings" }
+        ],
+        "buttons": [
+          { "id": "history", "type": "History" },
+          { "id": "downloads", "type": "Downloads" },
+          { "id": "settings", "type": "Settings" }
+        ]
+      }
+    },
+    {
+      "id": "sidebar-hover",
+      "type": "Sidebar",
+      "role": "hover",
+      "layout": { "left": 0, "top": 0, "bottom": 0, "width": 6 }
+    },
+    {
+      "id": "find",
+      "type": "FindBar",
+      "layout": { "top": 12, "right": 12, "width": 360, "height": 44 }
+    },
+    {
+      "id": "console",
+      "type": "Console",
+      "layout": { "left": 12, "right": 12, "bottom": 12, "height": 260 }
+    },
+    {
+      "id": "notices",
+      "type": "Notices",
+      "layout": { "top": 12, "right": 12, "width": 320, "height": 360 }
+    },
+    {
+      "id": "zoom",
+      "type": "ZoomIndicator",
+      "layout": { "top": 12, "right": 12, "width": 128, "height": 48 }
+    }
+  ]
+}

@@ -6,14 +6,10 @@ struct BrowserToastStack: View {
 
     var body: some View {
         VStack(alignment: .trailing, spacing: 8) {
-            ForEach(browser.toasts.prefix(4)) { toast in
-                let download = toast.downloadID.flatMap { id in
-                    browser.downloads.first { $0.id == id }
-                }
-
+            // Download notices are drawn by a component; these are the prompts Aria keeps.
+            ForEach(browser.toasts.filter { $0.kind != .download }.prefix(4)) { toast in
                 BrowserToastView(
                     toast: toast,
-                    download: download,
                     bezelStyle: browser.bezelStyle,
                     accentColor: browser.accentNSColor,
                     onAllow: {
@@ -21,13 +17,6 @@ struct BrowserToastStack: View {
                     },
                     onDeny: {
                         browser.denyMediaPermissionToast(id: toast.id)
-                    },
-                    onOpenDownload: {
-                        guard let downloadID = toast.downloadID else {
-                            return
-                        }
-
-                        browser.openDownloadedFile(id: downloadID)
                     },
                     onCredentialPrimary: {
                         browser.confirmCredentialToast(id: toast.id)
@@ -44,64 +33,16 @@ struct BrowserToastStack: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .topTrailing)
-        .allowsHitTesting(!browser.toasts.isEmpty)
-    }
-}
-
-struct BrowserZoomHUDView: View {
-    let hud: BrowserZoomHUD
-    let bezelStyle: BrowserBezelStyle
-    let accentColor: NSColor
-
-    private let cornerRadius: CGFloat = 16
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(.secondary)
-
-            Text(hud.percentText)
-                .font(.system(size: 18, weight: .bold))
-                .monospacedDigit()
-                .foregroundStyle(.primary)
-        }
-        .padding(.horizontal, 16)
-        .frame(height: 48)
-        .background {
-            ZStack {
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(.ultraThinMaterial)
-
-                BrowserChromeBackground(
-                    bezelStyle: bezelStyle,
-                    cornerRadius: cornerRadius,
-                    effect: .liquidGlass(
-                        style: .clear,
-                        tintColor: NSColor.black.withAlphaComponent(0.18)
-                    ),
-                    accentColor: accentColor,
-                    accentTintAlpha: 0.2
-                )
-            }
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .stroke(Color.white.opacity(0.2), lineWidth: 1)
-        }
-        .shadow(color: Color.black.opacity(0.22), radius: 22, y: 12)
-        .id(hud.id)
+        .allowsHitTesting(browser.toasts.contains { $0.kind != .download })
     }
 }
 
 private struct BrowserToastView: View {
     let toast: BrowserToast
-    let download: BrowserDownload?
     let bezelStyle: BrowserBezelStyle
     let accentColor: NSColor
     let onAllow: () -> Void
     let onDeny: () -> Void
-    let onOpenDownload: () -> Void
     let onCredentialPrimary: () -> Void
     let onDismiss: () -> Void
 
@@ -136,27 +77,20 @@ private struct BrowserToastView: View {
                         .fixedSize(horizontal: false, vertical: true)
 
                     if toast.kind != .mediaPermission {
-                        toastMessage
+                        Text(toast.message)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
-            if let progressFraction = toast.progressFraction, toast.status == .pending {
-                ProgressView(value: progressFraction)
-                    .progressViewStyle(.linear)
-                    .controlSize(.small)
-            } else if toast.kind == .download && toast.status == .pending {
-                ProgressView()
-                    .progressViewStyle(.linear)
-                    .controlSize(.small)
             }
 
             toastActions
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
-        .frame(maxWidth: toast.kind == .download ? .infinity : nil, alignment: .leading)
         .background {
             ZStack {
                 RoundedRectangle(cornerRadius: notificationCornerRadius, style: .continuous)
@@ -237,19 +171,6 @@ private struct BrowserToastView: View {
     }
 
     @ViewBuilder
-    private var toastMessage: some View {
-        if toast.kind == .download, toast.status == .pending, let download {
-            DownloadToastDetailView(download: download)
-        } else {
-            Text(toast.message)
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
-    @ViewBuilder
     private var toastActions: some View {
         switch toast.kind {
         case .mediaPermission:
@@ -279,24 +200,6 @@ private struct BrowserToastView: View {
                 Spacer()
             }
             .padding(.leading, 30)
-        case .download:
-            if toast.status == .success {
-                HStack {
-                    Button("Open", action: onOpenDownload)
-                        .buttonStyle(.plain)
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.primary)
-                        .padding(.horizontal, 9)
-                        .frame(height: 24)
-                        .background {
-                            Capsule(style: .continuous)
-                                .fill(Color.primary.opacity(0.08))
-                        }
-
-                    Spacer()
-                }
-                .padding(.leading, 30)
-            }
         case .credentialPrompt:
             if toast.status == .pending {
                 HStack(spacing: 8) {
@@ -326,73 +229,9 @@ private struct BrowserToastView: View {
                 }
                 .padding(.leading, 30)
             }
-        case .credentialStatus:
+        case .credentialStatus, .download:
             EmptyView()
         }
-    }
-}
-
-private struct DownloadToastDetailView: View {
-    let download: BrowserDownload
-
-    private let byteFieldWidth: CGFloat = 56
-    private let percentFieldWidth: CGFloat = 34
-    private let speedFieldWidth: CGFloat = 78
-
-    private var speedText: String? {
-        guard let speedBytesPerSecond = download.speedBytesPerSecond, speedBytesPerSecond > 0 else {
-            return nil
-        }
-
-        return "\(Self.formattedBytes(speedBytesPerSecond))/s"
-    }
-
-    var body: some View {
-        HStack(spacing: 4) {
-            if let expectedBytes = download.expectedBytes, expectedBytes > 0 {
-                fixedText(Self.formattedBytes(download.receivedBytes), width: byteFieldWidth, alignment: .trailing)
-                Text("of")
-                fixedText(Self.formattedBytes(expectedBytes), width: byteFieldWidth, alignment: .leading)
-                separator
-                fixedText(Self.formattedPercent(download.progressFraction ?? 0), width: percentFieldWidth, alignment: .trailing)
-            } else if download.receivedBytes > 0 {
-                fixedText(Self.formattedBytes(download.receivedBytes), width: byteFieldWidth + 18, alignment: .trailing)
-            } else {
-                fixedText("Downloading", width: byteFieldWidth + 72, alignment: .leading)
-            }
-
-            HStack(spacing: 4) {
-                separator
-                fixedText(speedText ?? "0 KB/s", width: speedFieldWidth, alignment: .leading)
-            }
-            .opacity(speedText == nil ? 0 : 1)
-            .accessibilityHidden(speedText == nil)
-        }
-        .font(.system(size: 11))
-        .foregroundStyle(.secondary)
-        .lineLimit(1)
-        .monospacedDigit()
-        .truncationMode(.tail)
-        .accessibilityLabel(download.detailText)
-    }
-
-    private var separator: some View {
-        Text("•")
-            .foregroundStyle(.tertiary)
-    }
-
-    private func fixedText(_ text: String, width: CGFloat, alignment: Alignment) -> some View {
-        Text(text)
-            .frame(width: width, alignment: alignment)
-    }
-
-    private static func formattedBytes(_ byteCount: Int64) -> String {
-        ByteCountFormatter.string(fromByteCount: byteCount, countStyle: .file)
-    }
-
-    private static func formattedPercent(_ fraction: Double) -> String {
-        let percent = Int((fraction * 100).rounded())
-        return "\(percent)%"
     }
 }
 

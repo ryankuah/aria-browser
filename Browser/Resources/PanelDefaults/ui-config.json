@@ -1,0 +1,15 @@
+{
+  "version": 8,
+  "root": [
+    {
+      "id": "web",
+      "type": "WebView",
+      "layout": {
+        "left": 0,
+        "top": 0,
+        "right": 0,
+        "bottom": 0
+      }
+    }
+  ]
+}
