@@ -58,6 +58,18 @@ Built with **SwiftUI and WebKit**, Aria uses the web engine supplied with macOS.
 | **Site permissions** | Control camera and microphone access for the current website. |
 | **Appearance** | Choose a simple bezel, or Liquid Glass on macOS 26 and later. |
 
+## Customize the layout
+
+Open **View → Customize Layout…** (⌥⌘L). Choose **Docked** or **Overlay**, then drag a component from the library or preview to a window edge. You can also select a component and click an edge. Components on the same edge with the same placement share a panel. Select one to change the panel size or visibility script, reorder its contents, or remove the component. **Save Layout** applies the changes to your open window.
+
+Aria saves placement in `~/Library/Application Support/com.ryankuah.browser/ui-config.json`. **Open Scripts Folder** opens the adjacent `PanelScripts` directory. Each UTF-8 `.js` file is the body of a visibility rule. For example, save this as `multiple-tabs.js` to show a panel when the window has more than one tab.
+
+```js
+return state.tabCount > 1;
+```
+
+Rules can read `state.edge`, `mode`, `pointerAtEdge`, `pointerInsidePanel`, `tabCount`, `activeDownloadCount`, and `host` on the same state object. Return a boolean. Aria reevaluates rules when these inputs change and reloads files when the app becomes active or you click **Reload Scripts**. Select the filename in the panel’s **Visibility** menu. The editor shows all placed panels, including ones hidden by their scripts.
+
 ## Get Aria
 
 1. Download the DMG from [GitHub Releases](https://github.com/ryankuah/aria-browser/releases).

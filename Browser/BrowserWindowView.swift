@@ -1,49 +1,26 @@
 import AppKit
 import SwiftUI
 
-private struct PassthroughHoverRegion: NSViewRepresentable {
-    let onHover: (Bool) -> Void
+private struct PanelPointerRegion: NSViewRepresentable {
+    let moved: (CGPoint?) -> Void
 
-    func makeNSView(context: Context) -> PassthroughHoverView {
-        let view = PassthroughHoverView()
-        view.onHover = onHover
-        return view
-    }
+    func makeNSView(context: Context) -> Tracker { Tracker() }
+    func updateNSView(_ view: Tracker, context: Context) { view.moved = moved }
 
-    func updateNSView(_ nsView: PassthroughHoverView, context: Context) {
-        nsView.onHover = onHover
-    }
-}
-private final class PassthroughHoverView: NSView {
-    var onHover: ((Bool) -> Void)?
-    private var trackingArea: NSTrackingArea?
-
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        nil
-    }
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-
-        if let trackingArea {
-            removeTrackingArea(trackingArea)
+    final class Tracker: NSView {
+        var moved: ((CGPoint?) -> Void)?
+        override var isFlipped: Bool { true }
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            trackingAreas.forEach(removeTrackingArea)
+            addTrackingArea(NSTrackingArea(rect: .zero,
+                options: [.mouseEnteredAndExited, .mouseMoved, .activeInKeyWindow, .inVisibleRect],
+                owner: self, userInfo: nil))
         }
-
-        let trackingArea = NSTrackingArea(
-            rect: .zero,
-            options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
-            owner: self
-        )
-        addTrackingArea(trackingArea)
-        self.trackingArea = trackingArea
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        onHover?(true)
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        onHover?(false)
+        override func mouseEntered(with event: NSEvent) { mouseMoved(with: event) }
+        override func mouseMoved(with event: NSEvent) { moved?(convert(event.locationInWindow, from: nil)) }
+        override func mouseExited(with event: NSEvent) { moved?(nil) }
     }
 }
 
@@ -125,8 +102,13 @@ struct BrowserWindowView: View {
     @StateObject private var windowReference = WindowReference()
     @ObservedObject var externalURLRouter: BrowserExternalURLRouter
 
-    @State private var isLeftZoneHovered = false
-    @State private var isSidebarHovered = false
+    @ObservedObject private var layoutStore = PanelLayoutStore.shared
+    @StateObject private var visibility = PanelVisibility()
+    @State private var hoveredEdges: Set<PanelEdge> = []
+    @State private var hoveredPanels: Set<String> = []
+    @State private var isEditingLayout = false
+    @State private var draggedTabID: BrowserTab.ID?
+    @State private var dimmedTabID: BrowserTab.ID?
     @State private var isNewTabPromptPresented = false
     @State private var isAddressPromptPresented = false
     @State private var isConsolePresented = false
@@ -134,15 +116,11 @@ struct BrowserWindowView: View {
     @State private var isFindPresented = false
     @State private var findNavigationRequest: BrowserFindNavigationRequest?
     @State private var commandKeyMonitor: Any?
-    @State private var pendingSidebarClose: DispatchWorkItem?
     @State private var webViewOcclusionRootRects: [CGRect] = []
     @State private var externalURLRegistrationID: UUID?
 
     private let topChromeHeight: CGFloat = 6
-    private let sidebarHoverWidth: CGFloat = 6
     private let contentInset: CGFloat = 6
-    private let sidebarWidth: CGFloat = 236
-    private let sidebarCloseDelay: TimeInterval = 0.1
     private let shellCornerRadius: CGFloat = 20
     private var webCornerRadius: CGFloat {
         max(shellCornerRadius - contentInset, 0)
@@ -152,22 +130,23 @@ struct BrowserWindowView: View {
         browser.accentPrefersDarkForeground ? .light : .dark
     }
 
-    private var isSidebarVisible: Bool {
-        !browser.isElementFullscreenActive && (isLeftZoneHovered || isSidebarHovered)
+    private var visibilityInput: PanelVisibilityInput {
+        PanelVisibilityInput(layout: layoutStore.layout, scripts: layoutStore.scripts, hoveredEdges: hoveredEdges,
+                             hoveredPanels: hoveredPanels, tabCount: browser.tabs.count,
+                             activeDownloadCount: browser.downloads.filter { $0.status == .inProgress }.count,
+                             host: browser.activeTab?.url?.host ?? "")
     }
 
     var body: some View {
         GeometryReader { proxy in
             let isElementFullscreenActive = browser.isElementFullscreenActive
-            let webOrigin = CGPoint(
-                x: contentInset,
-                y: topChromeHeight
-            )
-            let webSize = CGSize(
-                width: max(proxy.size.width - contentInset - contentInset, 0),
-                height: max(proxy.size.height - webOrigin.y - contentInset, 0)
-            )
-            let sidebarOverlayWidth = min(sidebarWidth, max(webSize.width, 0))
+            let bounds = CGRect(x: contentInset, y: topChromeHeight,
+                                width: max(0, proxy.size.width - 2 * contentInset),
+                                height: max(0, proxy.size.height - topChromeHeight - contentInset))
+            let panels = layoutStore.layout.panels.filter { !isElementFullscreenActive && visibility.visible.contains($0.id) }
+            let frames = PanelFrames(in: bounds, panels: panels)
+            let webOrigin = frames.webpage.origin
+            let webSize = frames.webpage.size
             ZStack(alignment: .topLeading) {
                 BrowserChromeBackground(
                     bezelStyle: browser.bezelStyle,
@@ -204,28 +183,24 @@ struct BrowserWindowView: View {
                 }
                 .frame(width: webSize.width, height: webSize.height, alignment: .topLeading)
                 .offset(x: webOrigin.x, y: webOrigin.y)
-                .animation(.easeInOut(duration: 0.16), value: isSidebarVisible)
 
-                if isSidebarVisible {
-                    sidebarOverlay(
-                        width: sidebarOverlayWidth,
-                        height: webSize.height,
-                        leadingCaptureWidth: contentInset
-                    )
-                        .offset(x: 0, y: webOrigin.y)
-                        .zIndex(4)
+                ForEach(panels) { panel in
+                    if let rect = frames.panels[panel.id] {
+                        panelView(panel)
+                            .frame(width: rect.width, height: rect.height)
+                            .clipShape(RoundedRectangle(cornerRadius: webCornerRadius))
+                            .webViewOcclusionRegion()
+                            .offset(x: rect.minX, y: rect.minY)
+                            .zIndex(1)
+                    }
                 }
 
                 if !isElementFullscreenActive {
-                    PassthroughHoverRegion { isHovered in
-                        updateLeftZoneHover(isHovered)
+                    PanelPointerRegion { point in
+                        trackPointer(point, in: bounds, frames: frames)
                     }
-                        .frame(
-                            width: contentInset + sidebarHoverWidth,
-                            height: webSize.height
-                        )
-                        .offset(x: 0, y: webOrigin.y)
-                        .zIndex(3)
+                    .frame(width: proxy.size.width, height: proxy.size.height)
+                    .zIndex(1)
 
                     WindowDragHandle()
                         .frame(width: proxy.size.width, height: topChromeHeight)
@@ -371,6 +346,9 @@ struct BrowserWindowView: View {
             }
             .frame(width: proxy.size.width, height: proxy.size.height)
             .coordinateSpace(name: BrowserWindowCoordinateSpace.root)
+            .sheet(isPresented: $isEditingLayout) {
+                PanelLayoutEditor(store: layoutStore, runtime: visibility, windowSize: bounds.size, tab: browser.activeTab)
+            }
             .onPreferenceChange(WebViewOcclusionPreferenceKey.self) { rects in
                 webViewOcclusionRootRects = rects
             }
@@ -403,6 +381,7 @@ struct BrowserWindowView: View {
             }
         )
         .focusedSceneValue(\.browserCommandActions, BrowserCommandActions(
+            customizeLayout: { isEditingLayout = true },
             newTab: {
                 isAddressPromptPresented = false
                 isNewTabPromptPresented = true
@@ -444,6 +423,10 @@ struct BrowserWindowView: View {
                 browser.resetActiveTabZoom()
             }
         ))
+        .task(id: visibilityInput) { [input = visibilityInput] in await visibility.update(input) }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            layoutStore.reloadScripts()
+        }
         .onAppear {
             installCommandKeyMonitorIfNeeded()
         }
@@ -452,9 +435,8 @@ struct BrowserWindowView: View {
                 return
             }
 
-            cancelPendingSidebarClose()
-            isLeftZoneHovered = false
-            isSidebarHovered = false
+            hoveredEdges = []
+            hoveredPanels = []
             webViewOcclusionRootRects = []
         }
         .onDisappear {
@@ -470,7 +452,7 @@ struct BrowserWindowView: View {
         }
 
         commandKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            guard windowReference.window?.isKeyWindow ?? false else {
+            guard windowReference.window?.isKeyWindow == true, !isEditingLayout else {
                 return event
             }
 
@@ -582,85 +564,32 @@ struct BrowserWindowView: View {
         browser.openInternalPage(page)
     }
 
-    private func sidebarOverlay(width: CGFloat, height: CGFloat, leadingCaptureWidth: CGFloat = 0) -> some View {
-        ZStack(alignment: .topLeading) {
-            Color.clear
-                .contentShape(Rectangle())
-
-            BrowserSidebar(
-                browser: browser,
-                isSettingsPresented: $isSettingsPresented,
-                window: windowReference.window,
-                cornerRadius: webCornerRadius,
-                onOpenFullSettings: {
-                    openInternalPage(.settings)
-                },
-                onOpenAddressPrompt: {
-                    isNewTabPromptPresented = false
-                    isAddressPromptPresented = true
-                },
-                onOpenHistory: {
-                    openInternalPage(.history)
-                }
-            )
-            .frame(width: width, height: height, alignment: .topLeading)
-            .clipShape(RoundedRectangle(cornerRadius: webCornerRadius, style: .continuous))
-            .offset(x: leadingCaptureWidth)
-        }
-        .frame(width: width + leadingCaptureWidth, height: height, alignment: .topLeading)
-        .webViewOcclusionRegion()
-        .transition(.move(edge: .leading))
-        .onHover { isHovered in
-            updateSidebarHover(isHovered)
-        }
+    private func panelView(_ panel: LayoutPanel) -> some View {
+        BrowserSidebar(
+            browser: browser, isSettingsPresented: $isSettingsPresented, panel: panel,
+            draggedTabID: $draggedTabID, dimmedTabID: $dimmedTabID, window: windowReference.window,
+            cornerRadius: webCornerRadius,
+            onOpenFullSettings: { openInternalPage(.settings) },
+            onOpenAddressPrompt: {
+                isNewTabPromptPresented = false
+                isAddressPromptPresented = true
+            },
+            onOpenHistory: { openInternalPage(.history) }
+        )
     }
 
-    private func updateLeftZoneHover(_ isHovered: Bool) {
-        if isHovered {
-            cancelPendingSidebarClose()
-            withAnimation(.easeInOut(duration: 0.16)) {
-                isLeftZoneHovered = true
-            }
-            return
+    private func trackPointer(_ point: CGPoint?, in bounds: CGRect, frames: PanelFrames) {
+        var edges = Set<PanelEdge>()
+        var inside = Set<String>()
+        if let point {
+            if point.x <= bounds.minX + 6 { edges.insert(.left) }
+            if point.x >= bounds.maxX - 6 { edges.insert(.right) }
+            if point.y <= bounds.minY + 6 { edges.insert(.top) }
+            if point.y >= bounds.maxY - 6 { edges.insert(.bottom) }
+            inside = Set(frames.panels.compactMap { $0.value.contains(point) ? $0.key : nil })
         }
-
-        scheduleSidebarClose {
-            isLeftZoneHovered = false
-        }
-    }
-
-    private func updateSidebarHover(_ isHovered: Bool) {
-        if isHovered {
-            cancelPendingSidebarClose()
-            withAnimation(.easeInOut(duration: 0.16)) {
-                isLeftZoneHovered = false
-                isSidebarHovered = true
-            }
-            return
-        }
-
-        scheduleSidebarClose {
-            isSidebarHovered = false
-        }
-    }
-
-    private func scheduleSidebarClose(_ update: @escaping () -> Void) {
-        pendingSidebarClose?.cancel()
-
-        let workItem = DispatchWorkItem {
-            withAnimation(.easeInOut(duration: 0.16)) {
-                update()
-            }
-            pendingSidebarClose = nil
-        }
-
-        pendingSidebarClose = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + sidebarCloseDelay, execute: workItem)
-    }
-
-    private func cancelPendingSidebarClose() {
-        pendingSidebarClose?.cancel()
-        pendingSidebarClose = nil
+        if edges != hoveredEdges { hoveredEdges = edges }
+        if inside != hoveredPanels { hoveredPanels = inside }
     }
 
     private func webViewOcclusionRects(rootRects: [CGRect], webOrigin: CGPoint, webSize: CGSize) -> [CGRect] {

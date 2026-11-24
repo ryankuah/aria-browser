@@ -4,6 +4,9 @@ import SwiftUI
 struct BrowserSidebar: View {
     @ObservedObject var browser: BrowserState
     @Binding var isSettingsPresented: Bool
+    let panel: LayoutPanel
+    @Binding var draggedTabID: BrowserTab.ID?
+    @Binding var dimmedTabID: BrowserTab.ID?
     let window: NSWindow?
     let cornerRadius: CGFloat
     let onOpenFullSettings: () -> Void
@@ -11,40 +14,42 @@ struct BrowserSidebar: View {
     let onOpenHistory: () -> Void
 
     @State private var isDownloadsPresented = false
-    @State private var draggedTabID: BrowserTab.ID?
-    @State private var dimmedTabID: BrowserTab.ID?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            headerControls
-            activePageControls
-            bookmarkSection
-
-            SidebarTabList(
-                browser: browser,
-                draggedTabID: $draggedTabID,
-                dimmedTabID: $dimmedTabID
-            )
-
-            DownloadsFooter(
-                browser: browser,
-                isPresented: $isDownloadsPresented,
-                isSettingsPresented: $isSettingsPresented,
-                onOpenFullSettings: onOpenFullSettings,
-                onOpenHistory: onOpenHistory
-            )
-                .padding(.horizontal, 10)
-                .padding(.bottom, 12)
+        let stack = panel.edge.vertical
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 12))
+            : AnyLayout(HStackLayout(spacing: 10))
+        stack {
+            ForEach(panel.components) { component in
+                switch component {
+                case .navigation:
+                    headerControls
+                case .address:
+                    activePageControls
+                case .bookmarks:
+                    bookmarkSection
+                case .tabs:
+                    SidebarTabList(browser: browser, draggedTabID: $draggedTabID, dimmedTabID: $dimmedTabID,
+                                   horizontal: !panel.edge.vertical)
+                case .tools:
+                    DownloadsFooter(
+                        browser: browser,
+                        isPresented: $isDownloadsPresented,
+                        isSettingsPresented: $isSettingsPresented,
+                        usesPopovers: !panel.edge.vertical,
+                        onOpenFullSettings: onOpenFullSettings,
+                        onOpenHistory: onOpenHistory
+                    )
+                    .padding(.horizontal, 10)
+                }
+            }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .padding(.vertical, panel.edge.vertical ? 12 : 4)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: panel.edge.vertical ? .topLeading : .leading)
         .background {
             BrowserChromeBackground(
                 bezelStyle: browser.bezelStyle,
                 cornerRadius: cornerRadius,
-                maskedCorners: [
-                    .layerMinXMinYCorner,
-                    .layerMinXMaxYCorner
-                ],
                 effect: .liquidGlass(
                     style: .regular,
                     tintColor: NSColor.black.withAlphaComponent(0.06)
@@ -62,7 +67,7 @@ struct BrowserSidebar: View {
         }
         .onDisappear {
             isDownloadsPresented = false
-            isSettingsPresented = false
+            if panel.components.contains(.tools) { isSettingsPresented = false }
         }
     }
 
@@ -88,10 +93,10 @@ struct BrowserSidebar: View {
             }
             .disabled(browser.activeTab == nil)
 
-            Spacer()
+            if panel.edge.vertical { Spacer() }
         }
         .padding(.horizontal, 16)
-        .padding(.top, 16)
+
     }
 
     @ViewBuilder

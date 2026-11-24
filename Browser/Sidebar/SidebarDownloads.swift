@@ -5,6 +5,7 @@ struct DownloadsFooter: View {
     @ObservedObject var browser: BrowserState
     @Binding var isPresented: Bool
     @Binding var isSettingsPresented: Bool
+    let usesPopovers: Bool
     let onOpenFullSettings: () -> Void
     let onOpenHistory: () -> Void
 
@@ -14,7 +15,7 @@ struct DownloadsFooter: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if isPresented {
+            if isPresented && !usesPopovers {
                 DownloadsPanel(
                     browser: browser,
                     bezelStyle: browser.bezelStyle,
@@ -23,7 +24,7 @@ struct DownloadsFooter: View {
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
-            if isSettingsPresented {
+            if isSettingsPresented && !usesPopovers {
                 BrowserSettingsPanel(
                     browser: browser,
                     bezelStyle: browser.bezelStyle,
@@ -34,7 +35,7 @@ struct DownloadsFooter: View {
             }
 
             HStack {
-                Spacer()
+                if !usesPopovers { Spacer() }
 
                 ForEach(browser.userScriptSidebarItems) { item in
                     SidebarIconButton(
@@ -63,6 +64,10 @@ struct DownloadsFooter: View {
                         isPresented.toggle()
                     }
                 }
+                .popover(isPresented: Binding(get: { usesPopovers && isPresented }, set: { isPresented = $0 })) {
+                    DownloadsPanel(browser: browser, bezelStyle: browser.bezelStyle, accentColor: browser.accentNSColor)
+                        .frame(width: 248).padding(8)
+                }
 
                 SidebarIconButton(
                     systemName: isSettingsPresented ? "gearshape.fill" : "gearshape",
@@ -74,6 +79,11 @@ struct DownloadsFooter: View {
                         }
                         isSettingsPresented.toggle()
                     }
+                }
+                .popover(isPresented: Binding(get: { usesPopovers && isSettingsPresented }, set: { isSettingsPresented = $0 })) {
+                    BrowserSettingsPanel(browser: browser, bezelStyle: browser.bezelStyle,
+                                         accentColor: browser.accentNSColor, onOpenFullSettings: onOpenFullSettings)
+                        .frame(width: 248).padding(8)
                 }
             }
         }

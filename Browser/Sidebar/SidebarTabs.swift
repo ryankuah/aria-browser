@@ -7,57 +7,66 @@ struct SidebarTabList: View {
     @Binding var draggedTabID: BrowserTab.ID?
     @Binding var dimmedTabID: BrowserTab.ID?
 
-    var body: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 5) {
-                ForEach(browser.visibleTabs) { tab in
-                    BrowserTabRow(
-                        tab: tab,
-                        isSelected: browser.selectedTabID == tab.id,
-                        isBookmarked: browser.isTabBookmarked(id: tab.id),
-                        onSelect: {
-                            browser.selectTab(id: tab.id)
-                        },
-                        onBookmark: {
-                            browser.bookmarkTab(id: tab.id)
-                        },
-                        onUnpin: {
-                            browser.unpinTab(id: tab.id)
-                        },
-                        onToggleMute: {
-                            browser.toggleMuteTab(id: tab.id)
-                        },
-                        onClose: {
-                            browser.closeTab(id: tab.id)
-                        }
-                    )
-                    .opacity(dimmedTabID == tab.id ? 0.45 : 1)
-                    .onDrag {
-                        draggedTabID = tab.id
-                        dimmedTabID = tab.id
-                        return NSItemProvider(object: tab.id.uuidString as NSString)
-                    }
-                    .onDrop(
-                        of: [.plainText],
-                        delegate: SidebarTabDropDelegate(
-                            browser: browser,
-                            targetTabID: tab.id,
-                            draggedTabID: $draggedTabID,
-                            dimmedTabID: $dimmedTabID
-                        )
-                    )
-                }
+    var horizontal = false
 
-                TabListEndDropTarget(
+    var body: some View {
+        ScrollView(horizontal ? .horizontal : .vertical) {
+            if horizontal {
+                LazyHStack(spacing: 5) { rows }.padding(.horizontal, 10)
+            } else {
+                LazyVStack(alignment: .leading, spacing: 5) { rows }
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 14)
+            }
+        }
+        .scrollIndicators(.hidden)
+    }
+
+    @ViewBuilder private var rows: some View {
+        ForEach(browser.visibleTabs) { tab in
+            BrowserTabRow(
+                tab: tab,
+                isSelected: browser.selectedTabID == tab.id,
+                isBookmarked: browser.isTabBookmarked(id: tab.id),
+                onSelect: {
+                    browser.selectTab(id: tab.id)
+                },
+                onBookmark: {
+                    browser.bookmarkTab(id: tab.id)
+                },
+                onUnpin: {
+                    browser.unpinTab(id: tab.id)
+                },
+                onToggleMute: {
+                    browser.toggleMuteTab(id: tab.id)
+                },
+                onClose: {
+                    browser.closeTab(id: tab.id)
+                }
+            )
+            .frame(width: horizontal ? 160 : nil)
+            .opacity(dimmedTabID == tab.id ? 0.45 : 1)
+            .onDrag {
+                draggedTabID = tab.id
+                dimmedTabID = tab.id
+                return NSItemProvider(object: tab.id.uuidString as NSString)
+            }
+            .onDrop(
+                of: [.plainText],
+                delegate: SidebarTabDropDelegate(
                     browser: browser,
+                    targetTabID: tab.id,
                     draggedTabID: $draggedTabID,
                     dimmedTabID: $dimmedTabID
                 )
-            }
-            .padding(.horizontal, 10)
-            .padding(.bottom, 14)
+            )
         }
-        .scrollIndicators(.hidden)
+
+        TabListEndDropTarget(
+            browser: browser,
+            draggedTabID: $draggedTabID,
+            dimmedTabID: $dimmedTabID
+        )
     }
 }
 

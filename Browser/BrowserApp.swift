@@ -104,6 +104,12 @@ private struct BrowserCommands: Commands {
             .disabled(browserCommandActions == nil)
         }
 
+        CommandGroup(after: .toolbar) {
+            Button("Customize Layout…") { browserCommandActions?.customizeLayout() }
+                .keyboardShortcut("l", modifiers: [.command, .option])
+                .disabled(browserCommandActions == nil)
+        }
+
         CommandMenu("Page") {
             Button("Find in Page") {
                 browserCommandActions?.showFind()
@@ -147,6 +153,7 @@ private struct BrowserCommands: Commands {
 }
 
 struct BrowserCommandActions {
+    var customizeLayout: () -> Void
     var newTab: () -> Void
     var reopenClosedTab: () -> Void
     var closeTab: () -> Void

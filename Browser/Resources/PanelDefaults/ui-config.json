@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "panels": [
+    {
+      "edge": "left",
+      "mode": "overlay",
+      "size": 236,
+      "visibility": "edge-hover.js",
+      "components": ["navigation", "address", "bookmarks", "tabs", "tools"]
+    }
+  ]
+}
