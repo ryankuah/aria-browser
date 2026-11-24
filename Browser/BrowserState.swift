@@ -43,6 +43,9 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
     @Published private var tabStateRevision = 0
     @Published private var mediaPermissionDecisionsByOrigin: [String: [BrowserMediaDeviceKind: Bool]] = [:]
     @Published private(set) var isElementFullscreenActive = false
+    /// What find in page last looked for, and whether it was on the page. Nil before a search.
+    @Published private(set) var findQuery = ""
+    @Published private(set) var findMatched: Bool?
 
     private let persistence: BrowserPersistenceStore
     private let downloadDirectory: URL
@@ -611,6 +614,26 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
 
     func clearActiveFindSelection() {
         activeTab?.clearFindSelection()
+        findQuery = ""
+        findMatched = nil
+    }
+
+    /// Finds `query` in the active page and remembers it, so find next and previous can repeat it.
+    func find(_ query: String, backwards: Bool = false) {
+        findQuery = query
+        guard !query.isEmpty else {
+            findMatched = nil
+            activeTab?.clearFindSelection()
+            return
+        }
+        findInActivePage(query, backwards: backwards) { [weak self] matched in
+            guard self?.findQuery == query else { return }
+            self?.findMatched = matched
+        }
+    }
+
+    func findAgain(backwards: Bool) {
+        find(findQuery, backwards: backwards)
     }
 
     func toggleMuteTab(id: BrowserTab.ID) {
@@ -1106,10 +1129,19 @@ final class BrowserState: NSObject, ObservableObject, WKUIDelegate, WKDownloadDe
             return
         }
 
-        var decisions = mediaPermissionDecisionsByOrigin[originKey] ?? [:]
-        decisions[kind] = !(decisions[kind] == true)
-        mediaPermissionDecisionsByOrigin[originKey] = decisions
-        persistMediaPermissionDecision(originKey: originKey, kind: kind, isAllowed: decisions[kind] == true)
+        if mediaPermissionDecisionsByOrigin[originKey]?[kind] == true {
+            setMediaPermissionDecision(false, for: [kind], originKey: originKey)
+            return
+        }
+        guard let window = activeTab?.webView.window, window.attachedSheet == nil else { return }
+        let alert = NSAlert()
+        alert.messageText = "Allow \(originKey) to use your \(kind.rawValue)?"
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Allow")
+        runAlert(alert, attachedTo: window) { [weak self] response in
+            guard response == .alertSecondButtonReturn, self?.activeOriginKey == originKey else { return }
+            self?.setMediaPermissionDecision(true, for: [kind], originKey: originKey)
+        }
     }
 
     func dismissToast(id: BrowserToast.ID) {

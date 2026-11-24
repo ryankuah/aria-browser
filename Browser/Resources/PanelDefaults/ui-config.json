@@ -1,12 +1,15 @@
 {
-  "version": 1,
-  "panels": [
+  "version": 8,
+  "root": [
     {
-      "edge": "left",
-      "mode": "overlay",
-      "size": 236,
-      "visibility": "edge-hover.js",
-      "components": ["navigation", "address", "bookmarks", "tabs", "tools"]
+      "id": "web",
+      "type": "WebView",
+      "layout": {
+        "left": 0,
+        "top": 0,
+        "right": 0,
+        "bottom": 0
+      }
     }
   ]
 }
